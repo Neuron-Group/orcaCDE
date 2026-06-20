@@ -10,6 +10,7 @@ import NsCDE.Backend.Labwc.KeybindXml (renderKeyboardXml)
 import NsCDE.Backend.Labwc.MenuXml (renderMenuXml)
 import NsCDE.Backend.Labwc.RcXml (renderRcXml)
 import NsCDE.Backend.Labwc.SessionFiles (renderAutostart, renderEnvironment, renderShutdown)
+import NsCDE.Domain.Runtime
 import NsCDE.Foundation.Common (writeAtomicFile)
 import NsCDE.Foundation.EnvFile (renderEnvFile)
 import NsCDE.Foundation.Settings (lookupText)
@@ -18,11 +19,23 @@ import NsCDE.Policy.Keybinds (buildKeybinds, resolveTerminal)
 import NsCDE.Policy.Menu (buildMenuModel)
 import NsCDE.Policy.PanelLayout (emitPanelLayout, loadStaticPanelProfile)
 import NsCDE.Policy.SessionPlan (buildRcConfig, buildSessionPlan)
+import NsCDE.Runtime.Daemon (runCtl, runDaemon, runQuery)
 
 main :: IO ()
 main = do
   args <- getArgs
   case args of
+    ["daemon"] -> runDaemon
+    ["ctl", "workspace-switch", workspaceName] ->
+      runCtl (CommandWorkspaceSwitch workspaceName)
+    ["ctl", "workspace-rename", oldWorkspace, newWorkspace] ->
+      runCtl (CommandWorkspaceRename oldWorkspace newWorkspace)
+    ["ctl", "reload"] ->
+      runCtl CommandReload
+    ["ctl", "window", windowCommandText, windowIdText] ->
+      publishWindowCtl windowCommandText windowIdText
+    ["query", topicText] ->
+      publishQuery topicText
     ["panel-layout", "publish"] -> publishPanelLayout Nothing
     ["panel-layout", "publish", staticPath] -> publishPanelLayout (Just staticPath)
     ["labwc-menu", "publish", configDir] -> publishLabwcMenuXml configDir
@@ -30,6 +43,12 @@ main = do
     ["labwc-rc", "publish", configDir] -> publishLabwcRcXml configDir
     ["labwc-session", "publish", configDir] -> publishLabwcSessionFiles configDir
     _ -> do
+      hPutStrLn stderr "Usage: nscde-runtime daemon"
+      hPutStrLn stderr "       nscde-runtime ctl workspace-switch WORKSPACE"
+      hPutStrLn stderr "       nscde-runtime ctl workspace-rename OLD NEW"
+      hPutStrLn stderr "       nscde-runtime ctl window <activate|close|minimize|restore|maximize> ID"
+      hPutStrLn stderr "       nscde-runtime ctl reload"
+      hPutStrLn stderr "       nscde-runtime query <session|panel|panel-layout|workspaces|windows|subpanels|pager|taskd|capabilities>"
       hPutStrLn stderr "Usage: nscde-runtime panel-layout publish [STATIC_PANEL_LAYOUT_FILE]"
       hPutStrLn stderr "       nscde-runtime labwc-menu publish CONFIG_DIR"
       hPutStrLn stderr "       nscde-runtime labwc-keybinds publish"
@@ -74,6 +93,28 @@ publishLabwcSessionFiles configDir = do
   writeAtomicFile (configDir </> "autostart") (renderAutostart plan)
   writeAtomicFile (configDir </> "environment") (renderEnvironment plan)
   writeAtomicFile (configDir </> "shutdown") (renderShutdown plan)
+
+publishWindowCtl :: String -> String -> IO ()
+publishWindowCtl windowCommandText windowIdText =
+  case parseRuntimeWindowCommand windowCommandText of
+    Nothing -> do
+      hPutStrLn stderr ("Unsupported window command: " ++ windowCommandText)
+      exitFailure
+    Just windowCommand ->
+      case reads windowIdText of
+        [(windowId, "")] ->
+          runCtl (CommandWindow windowCommand windowId)
+        _ -> do
+          hPutStrLn stderr ("Invalid window id: " ++ windowIdText)
+          exitFailure
+
+publishQuery :: String -> IO ()
+publishQuery topicText =
+  case parseRuntimeTopic topicText of
+    Just topic -> runQuery topic
+    Nothing -> do
+      hPutStrLn stderr ("Unsupported query topic: " ++ topicText)
+      exitFailure
 
 readOptionalFile :: FilePath -> IO String
 readOptionalFile "" = pure ""

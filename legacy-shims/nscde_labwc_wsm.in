@@ -40,6 +40,9 @@ DEFAULT_PALETTE = [
 
 
 def state_dir():
+    state = os.environ.get("NSCDE_STATE_DIR", "")
+    if state:
+        return state
     cache_home = os.environ.get(
         "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
     )
@@ -75,17 +78,54 @@ def pager_fifo_path():
 
 
 def parse_env_file(path):
-    data = {}
     if not os.path.exists(path):
-        return data
+        return {}
     with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            data[key] = value
+        return parse_env_contents(handle.read())
+
+
+def parse_env_contents(contents):
+    data = {}
+    for line in contents.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value
     return data
+
+
+def runtime_bin():
+    return os.environ.get("NSCDE_RUNTIME_BIN", "nscde-runtime")
+
+
+def runtime_query_state(topic):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "query", topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    return parse_env_contents(result.stdout)
+
+
+def runtime_ctl(*args):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "ctl"] + list(args),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
 
 
 def read_palette(state):
@@ -222,8 +262,22 @@ def send_pager_command(cmd):
         pass
 
 
+def send_workspace_switch(workspace_name):
+    if runtime_ctl("workspace-switch", workspace_name):
+        return
+    send_pager_command("switch_workspace:{}".format(workspace_name))
+
+
+def send_workspace_rename(old_name, new_name):
+    if runtime_ctl("workspace-rename", old_name, new_name):
+        return
+    send_fifo_command("rename_workspace:{}:{}".format(old_name, new_name))
+
+
 def read_workspaces():
-    state = parse_env_file(workspaces_env_path())
+    state = runtime_query_state("workspaces")
+    if not state:
+        state = parse_env_file(workspaces_env_path())
     ws_list = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
     count = int(state.get("NSCDE_WORKSPACE_COUNT", "4"))
     current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
@@ -249,7 +303,7 @@ class WorkspaceButton(QPushButton):
         self.style().polish(self)
 
     def _on_switch(self):
-        send_pager_command("switch_workspace:{}".format(self.ws_name))
+        send_workspace_switch(self.ws_name)
 
     def mouseDoubleClickEvent(self, event):
         self._parent_widget._start_rename(self)
@@ -321,7 +375,9 @@ class NsCDEWSM(QWidget):
         main_layout.addWidget(frame)
 
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
+        state = runtime_query_state("panel")
+        if not state:
+            state = parse_env_file(env_path())
         pal = read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
@@ -366,7 +422,7 @@ class NsCDEWSM(QWidget):
         old_name = self._rename_target.ws_name
         new_name = self._rename_edit.text().strip()
         if new_name and new_name != old_name:
-            send_fifo_command("rename_workspace:{}:{}".format(old_name, new_name))
+            send_workspace_rename(old_name, new_name)
         self._cancel_rename()
 
     def _cancel_rename(self):

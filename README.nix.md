@@ -99,6 +99,11 @@ Concrete seams removed so far:
 - keybind generation is now owned by `nscde-runtime`; the launcher prefers the
   runtime publisher and `nscde_labwc_keybindgen` remains only as a compatibility
   wrapper
+- session coordination is now owned by `nscde-runtime daemon`; the packaged
+  launcher autostart starts the runtime daemon directly and
+  `legacy-shims/nscde_sessiond` remains only as a compatibility wrapper
+- the current runtime verification path now smoke-tests the daemon socket plus
+  `ctl` / `query`, not just the render subcommands
 
 The standalone repo now carries `labwc/` as a git submodule and the flake
 builds the packaged launcher against that bundled patched compositor by

@@ -40,6 +40,9 @@ DEFAULT_PALETTE = [
 
 
 def state_dir():
+    state = os.environ.get("NSCDE_STATE_DIR", "")
+    if state:
+        return state
     cache_home = os.environ.get(
         "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
     )
@@ -71,17 +74,54 @@ def taskd_fifo_path():
 
 
 def parse_env_file(path):
-    data = {}
     if not os.path.exists(path):
-        return data
+        return {}
     with open(path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                data[key] = value
+        return parse_env_contents(handle.read())
+
+
+def parse_env_contents(contents):
+    data = {}
+    for line in contents.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value
     return data
+
+
+def runtime_bin():
+    return os.environ.get("NSCDE_RUNTIME_BIN", "nscde-runtime")
+
+
+def runtime_query_state(topic):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "query", topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    return parse_env_contents(result.stdout)
+
+
+def runtime_ctl(*args):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "ctl"] + list(args),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
 
 
 def read_palette(state):
@@ -178,8 +218,9 @@ def build_stylesheet(pal):
 
 def read_windows():
     """Read windows.env and return a list of window dicts."""
-    path = windows_env_path()
-    state = parse_env_file(path)
+    state = runtime_query_state("windows")
+    if not state:
+        state = parse_env_file(windows_env_path())
     count = int(state.get("NSCDE_WINDOW_COUNT", "0"))
     windows = []
     for i in range(count):
@@ -212,6 +253,12 @@ def send_fifo_command(cmd):
         pass
 
 
+def send_window_command(action, window_id):
+    if runtime_ctl("window", action, str(window_id)):
+        return
+    send_fifo_command("{}:{}".format(action, window_id))
+
+
 class IconBoxButton(QPushButton):
     """A button representing a window in the icon box."""
 
@@ -235,7 +282,7 @@ class IconBoxButton(QPushButton):
         self.setToolTip("Click to restore\nRight-click for menu")
 
     def _on_activate(self):
-        send_fifo_command("restore:{}".format(self.window_data["id"]))
+        send_window_command("restore", self.window_data["id"])
 
     def _show_context_menu(self, pos):
         menu = QMenu(self)
@@ -253,10 +300,10 @@ class IconBoxButton(QPushButton):
         menu.exec_(self.mapToGlobal(pos))
 
     def _on_maximize(self):
-        send_fifo_command("maximize:{}".format(self.window_data["id"]))
+        send_window_command("maximize", self.window_data["id"])
 
     def _on_close(self):
-        send_fifo_command("close:{}".format(self.window_data["id"]))
+        send_window_command("close", self.window_data["id"])
 
 
 class NsCDEIconBox(QWidget):
@@ -309,7 +356,9 @@ class NsCDEIconBox(QWidget):
         main_layout.addWidget(frame)
 
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
+        state = runtime_query_state("panel")
+        if not state:
+            state = parse_env_file(env_path())
         pal = read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))

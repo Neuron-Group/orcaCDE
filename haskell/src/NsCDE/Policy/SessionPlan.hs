@@ -37,7 +37,7 @@ buildSessionPlan env =
         , renderShellExport "NSCDE_RUNTIME_BIN" runtimeBin
         , renderShellExport "NSCDE_STATIC_PANEL_LAYOUT_FILE" staticPanelLayoutFile
         , renderShellExport "NSCDE_STATIC_SESSION_ENV_FILE" staticSessionEnvFile
-        , renderCommand (toolsDir </> "nscde_sessiond") ++ " &"
+        , renderCommand runtimeBin ++ " daemon &"
         , renderCommand (toolsDir </> "nscde_labwc_pagerd") ++ " &"
         , renderCommand (toolsDir </> "nscde_labwc_toplevel") ++ " &"
         , renderCommand (toolsDir </> "nscde_labwc_taskd") ++ " &"

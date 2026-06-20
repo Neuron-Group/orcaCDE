@@ -42,6 +42,7 @@ test -s "$STATE_DIR/panel-layout.env"
 test -s "$THEME_FILE"
 
 grep -q 'nscde_labwc_paneld' "$LABWC_CONFIG_DIR/autostart"
+grep -q 'nscde-runtime.*daemon' "$LABWC_CONFIG_DIR/autostart"
 grep -q '<labwc_config>' "$LABWC_CONFIG_DIR/rc.xml"
 grep -q 'Style Manager' "$LABWC_CONFIG_DIR/menu.xml"
 grep -q '^NSCDE_PANEL_LAYOUT_SOURCE=haskell-runtime$' "$STATE_DIR/panel-layout.env"

@@ -73,7 +73,8 @@
           pkgs.writeText "reference-panel-layout.env" (import ./nix/modules/reference-panel-layout.nix);
         referenceSessionEnvFile =
           pkgs.writeText "reference-labwc-session-env.env" (import ./nix/modules/reference-labwc-session-env.nix);
-        runtimePkg = pkgs.haskellPackages.callCabal2nix "nscde-wayland-runtime" self { };
+        workspaceSrc = ./.;
+        runtimePkg = pkgs.haskellPackages.callCabal2nix "nscde-wayland-runtime" workspaceSrc { };
         buildNativeClient =
           { pname
           , version ? "0.1.0"
@@ -84,7 +85,7 @@
           }:
           pkgs.stdenv.mkDerivation {
             inherit pname version;
-            src = self;
+            src = workspaceSrc;
             dontConfigure = true;
             nativeBuildInputs = [ pkgs.pkg-config ];
             buildInputs = [ pkgs.wayland ] ++ buildInputs;
@@ -174,7 +175,7 @@
         launcherPkg = pkgs.stdenv.mkDerivation {
           pname = "nscde-wayland-bootstrap";
           version = "0.1.0";
-          src = self;
+          src = workspaceSrc;
           dontConfigure = true;
           dontBuild = true;
           nativeBuildInputs = [ pkgs.makeWrapper ];

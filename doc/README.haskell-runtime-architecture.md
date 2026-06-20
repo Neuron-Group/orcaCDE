@@ -130,6 +130,14 @@ The current extracted runtime now owns these render-time paths directly:
   - keybind fragment inclusion through `NSCDE_LABWC_KEYBIND_XML_FILE`
 - `autostart`, `environment`, and `shutdown`
   - typed session-file planning and rendering
+- `nscde-runtime daemon`
+  - canonical owner of normalized session compatibility state in the
+    standalone repo
+  - publishes `session.env`, `panel.env`, `panel-layout.env`,
+    `workspaces.env`, `pager.env`, `subpanels.env`, `capabilities`, and
+    initial `windows.env` / `taskd.env`
+  - serves socket-based `ctl` / `query` requests and bridges current FIFO
+    compatibility commands for `pagerd` and `toplevel`
 
 The packaged launcher now prefers `nscde-runtime` for:
 
@@ -138,6 +146,8 @@ The packaged launcher now prefers `nscde-runtime` for:
 - `labwc-keybinds publish`
 - `labwc-rc publish`
 - `labwc-session publish`
+- session coordination through `daemon`
+- shell/PyQt control reads and actions through `query` / `ctl`
 
 The current compatibility shim boundary is:
 
@@ -145,6 +155,19 @@ The current compatibility shim boundary is:
   - now a runtime-first wrapper
 - `nscde_labwc_menugen`
   - no longer on the packaged launcher path
+- `nscde_sessiond`
+  - now a compatibility wrapper that execs `nscde-runtime daemon`
+- `nscde_labwc_wsm`, `nscde_labwc_iconbox`, `nscde_labwc_sysaction`
+  - now runtime-first clients with env-file / FIFO fallback
+
+Current verified handoff:
+
+- `nscde-runtime daemon`, `ctl`, and `query` now pass the standalone
+  `runtime-check`
+- the packaged launcher autostart now starts `nscde-runtime daemon`
+- `runtime-check`, `launcher-check`, and `nix flake check` cover this
+  transitional daemon-owned session path while native `C` clients still consume
+  compatibility env files and FIFOs
 
 ## Dependency graph
 

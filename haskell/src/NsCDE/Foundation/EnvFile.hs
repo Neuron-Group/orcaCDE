@@ -1,17 +1,35 @@
 module NsCDE.Foundation.EnvFile
   ( KeyValue
+  , parseEnvContents
+  , parseEnvLine
   , readEnvFile
+  , readEnvFileIfExists
   , renderEnvFile
   ) where
 
 import Data.Char (isSpace)
+import System.Directory (doesFileExist)
 
 type KeyValue = (String, String)
+
+parseEnvContents :: String -> [KeyValue]
+parseEnvContents contents =
+  foldr collectLine [] (lines contents)
+
+parseEnvLine :: String -> Maybe KeyValue
+parseEnvLine = parseLine
 
 readEnvFile :: FilePath -> IO [KeyValue]
 readEnvFile path = do
   contents <- readFile path
-  pure (foldr collectLine [] (lines contents))
+  pure (parseEnvContents contents)
+
+readEnvFileIfExists :: FilePath -> IO [KeyValue]
+readEnvFileIfExists path = do
+  exists <- doesFileExist path
+  if exists
+    then readEnvFile path
+    else pure []
 
 renderEnvFile :: [KeyValue] -> String
 renderEnvFile entries =
