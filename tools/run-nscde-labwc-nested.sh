@@ -44,7 +44,7 @@ fi
 
 require_cmd nix
 require_cmd weston
-require_cmd foot
+require_cmd kitty
 require_file "$ROOT_DIR/flake.nix"
 require_file "$ROOT_DIR/.gitmodules"
 
@@ -71,7 +71,7 @@ BOOTSTRAP_OUT="$(nix build --no-link --print-out-paths "path:$ROOT_DIR#nscde-way
 mkdir -p "$TESTBIN"
 cat > "$TESTBIN/nscde-test-terminal" <<'EOF'
 #!/bin/sh
-exec foot -o csd.preferred=server -o csd.size=0 "$@"
+exec kitty -o linux_display_server=wayland "$@"
 EOF
 chmod +x "$TESTBIN/nscde-test-terminal"
 
