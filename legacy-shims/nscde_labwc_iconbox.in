@@ -1,0 +1,349 @@
+#!@PYTHON@
+
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def state_dir():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1")
+
+
+def env_path():
+    return os.path.join(state_dir(), "panel.env")
+
+
+def style_env_path():
+    return os.path.join(state_dir(), "style.env")
+
+
+def windows_env_path():
+    return os.path.join(state_dir(), "windows.env")
+
+
+def session_fifo_path():
+    return os.path.join(state_dir(), "sessiond.fifo")
+
+
+def taskd_fifo_path():
+    state = parse_env_file(windows_env_path())
+    fifo = state.get("NSCDE_TASKD_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    return os.path.join(state_dir(), "topleveld.fifo")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEIconBox {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QLabel#emptyLabel {{
+                color: {sh};
+                font-style: italic;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 128px;
+                min-height: 32px;
+                padding: 2px 8px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+                text-align: left;
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+def read_windows():
+    """Read windows.env and return a list of window dicts."""
+    path = windows_env_path()
+    state = parse_env_file(path)
+    count = int(state.get("NSCDE_WINDOW_COUNT", "0"))
+    windows = []
+    for i in range(count):
+        title = state.get("NSCDE_WINDOW_{}_TITLE".format(i), "")
+        app_id = state.get("NSCDE_WINDOW_{}_APP_ID".format(i), "")
+        minimized = state.get("NSCDE_WINDOW_{}_MINIMIZED".format(i), "0") == "1"
+        maximized = state.get("NSCDE_WINDOW_{}_MAXIMIZED".format(i), "0") == "1"
+        activated = state.get("NSCDE_WINDOW_{}_ACTIVATED".format(i), "0") == "1"
+        windows.append({
+            "id": i,
+            "title": title,
+            "app_id": app_id,
+            "minimized": minimized,
+            "maximized": maximized,
+            "activated": activated,
+        })
+    return windows
+
+
+def send_fifo_command(cmd):
+    """Send a command to the toplevel FIFO."""
+    fifo = taskd_fifo_path()
+    if not os.path.exists(fifo):
+        return
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, (cmd + "\n").encode("utf-8"))
+        os.close(fd)
+    except (OSError, BlockingIOError):
+        pass
+
+
+class IconBoxButton(QPushButton):
+    """A button representing a window in the icon box."""
+
+    def __init__(self, window_data, parent=None):
+        super().__init__(parent)
+        self.window_data = window_data
+        self._update_label()
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
+        self.clicked.connect(self._on_activate)
+
+    def _update_label(self):
+        wd = self.window_data
+        app = wd["app_id"] or "unknown"
+        title = wd["title"] or ""
+        if title:
+            label = "{} - {}".format(app, title)
+        else:
+            label = app
+        self.setText(label)
+        self.setToolTip("Click to restore\nRight-click for menu")
+
+    def _on_activate(self):
+        send_fifo_command("restore:{}".format(self.window_data["id"]))
+
+    def _show_context_menu(self, pos):
+        menu = QMenu(self)
+        menu.setStyleSheet(self.styleSheet())
+
+        restore_action = menu.addAction("Restore")
+        restore_action.triggered.connect(self._on_activate)
+
+        maximize_action = menu.addAction("Maximize")
+        maximize_action.triggered.connect(self._on_maximize)
+
+        close_action = menu.addAction("Close")
+        close_action.triggered.connect(self._on_close)
+
+        menu.exec_(self.mapToGlobal(pos))
+
+    def _on_maximize(self):
+        send_fifo_command("maximize:{}".format(self.window_data["id"]))
+
+    def _on_close(self):
+        send_fifo_command("close:{}".format(self.window_data["id"]))
+
+
+class NsCDEIconBox(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Icon Box")
+        self.setObjectName("NsCDEIconBox")
+        self.setMinimumWidth(300)
+        self.setMinimumHeight(100)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self._buttons = []
+        self._last_count = -1
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._refresh_windows()
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh_windows)
+        self._timer.start(1000)
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        self._frame_layout = QVBoxLayout(frame)
+        self._frame_layout.setContentsMargins(4, 4, 4, 4)
+        self._frame_layout.setSpacing(2)
+
+        title_row = QHBoxLayout()
+        title = QLabel("Icon Box")
+        title.setObjectName("titleLabel")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        self._frame_layout.addLayout(title_row)
+
+        self._icon_area = QVBoxLayout()
+        self._icon_area.setSpacing(2)
+        self._frame_layout.addLayout(self._icon_area)
+
+        self._empty_label = QLabel("No iconified windows")
+        self._empty_label.setObjectName("empty_label")
+        self._empty_label.setAlignment(Qt.AlignCenter)
+        self._frame_layout.addWidget(self._empty_label)
+
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _refresh_windows(self):
+        windows = read_windows()
+        iconified = [w for w in windows if w["minimized"]]
+
+        current_count = len(iconified)
+        if current_count == self._last_count:
+            return
+        self._last_count = current_count
+
+        for btn in self._buttons:
+            btn.setParent(None)
+            btn.deleteLater()
+        self._buttons = []
+
+        if not iconified:
+            self._empty_label.show()
+        else:
+            self._empty_label.hide()
+            for wd in iconified:
+                btn = IconBoxButton(wd, self)
+                self._buttons.append(btn)
+                self._icon_area.addWidget(btn)
+
+
+def main():
+    app = QApplication(sys.argv)
+    iconbox = NsCDEIconBox()
+    iconbox.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

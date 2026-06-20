@@ -1,0 +1,103 @@
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# Button, Icon, MouseBtn, CheckFor/NOCHK, Command
+
+Btn1,__APPLET__,M1,"Swallow (Respawn) \\"pclock\\" \\"None (pclock) Exec exec $[NSCDE_TOOLSDIR]/fpclock -w -B $[FVWM_USERDIR]/icons/NsCDE/Fpclock.xpm\\"",Exec exec $[infostore.browser]
+Btn1,,M2,FVWM,Nop
+Btn1,,M3,FVWM,f_FrontPanelPropsMenu 1 $[gt.Web Browser] ($[infostore.browser])
+
+Btn2,__APPLET__,M1,"Swallow (Respawn|FvwmModule) \\"FPMonthDayApplet\\" \\"Module FvwmScript MonthDayApplet\\"",SendToModule MonthDayApplet SendString 2 1 dummystring
+Btn2,,M2,FVWM,Nop
+Btn2,,M3,FVWM,f_FrontPanelPropsMenu 2 $[gt.Calendar]
+
+Btn3,NsCDE/Fphome.l.pm,M1,$[infostore.filemgr],$[infostore.filemgr]
+Btn3,,M2,FVWM,Nop
+Btn3,,M3,FVWM,f_FrontPanelPropsMenu 3 $[gt.File Manager]
+
+Btn4,NsCDE/Fpterm.l.pm,M1,$[infostore.terminal],$[infostore.terminal]
+Btn4,,M2,FVWM,Nop
+Btn4,,M3,FVWM,f_FrontPanelPropsMenu 4 $[gt.Terminal]
+
+Btn5,__APPLET__,M1,"Swallow (Respawn|FvwmModule) \\"FPCheckMailApplet\\" \\"Module FvwmScript CheckMailApplet\\"",SendToModule CheckMailApplet SendString 1 1 dummystring
+Btn5,,M2,FVWM,Nop
+Btn5,,M3,FVWM,f_FrontPanelPropsMenu 5 $[gt.Check Mail]
+
+Btn6,NsCDE/Fpprnt.l.pm,M1,NOCHK,$[infostore.printmgr]
+Btn6,,M2,FVWM,Nop
+Btn6,,M3,FVWM,f_FrontPanelPropsMenu 6 $[gt.Print Manager]
+
+Btn7,NsCDE/Fpstyle.l.pm,M1,FVWM,f_ToggleFvwmModule FvwmScript StyleMgr
+Btn7,,M2,FVWM,None (BackdropMgr) Module FvwmScript BackdropMgr $[desk.n] $[infostore.desknum]
+Btn7,,M3,FVWM,f_FrontPanelPropsMenu 7 $[gt.Style Manager]
+
+Btn8,__ICON8__,M1,__SPECIAL8__,__APPCMD8__
+Btn8,,M2,FVWM,Nop
+Btn8,,M3,FVWM,f_FrontPanelPropsMenu 8 $[infostore.fp_props_menu_title_8]
+
+Btn9,NsCDE/Multimedia.l.pm,M1,FVWM,SendToModule FrontPanel PressButton NsCDE-Subpanel9
+Btn9,,M2,FVWM,Nop
+Btn9,,M3,FVWM,f_FrontPanelPropsMenu 9 $[gt.Multimedia]
+
+Btn10,NsCDE/Fphelp.l.pm,M1,$[infostore.browser],$NSCDE_ROOT/bin/nscde_fvwmclnt 'f_DisplayURL "$[gt.NsCDE Documentation]" html/index.html'
+Btn10,,M2,FVWM,Nop
+Btn10,,M3,FVWM,f_FrontPanelPropsMenu 10 $[gt.Help]
+
+Btn11,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 11
+Btn11,,M2,FVWM,Nop
+Btn11,,M3,FVWM,f_FrontPanelPropsMenu 11 $[gt.Empty Launcher]
+
+Btn12,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 12
+Btn12,,M2,FVWM,Nop
+Btn12,,M3,FVWM,f_FrontPanelPropsMenu 12 $[gt.Empty Launcher]
+
+Btn13,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 13
+Btn13,,M2,FVWM,Nop
+Btn13,,M3,FVWM,f_FrontPanelPropsMenu 13 $[gt.Empty Launcher]
+
+Btn14,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 14
+Btn14,,M2,FVWM,Nop
+Btn14,,M3,FVWM,f_FrontPanelPropsMenu 14 $[gt.Empty Launcher]
+
+Btn15,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 15
+Btn15,,M2,FVWM,Nop
+Btn15,,M3,FVWM,f_FrontPanelPropsMenu 15 $[gt.Empty Launcher]
+
+Btn16,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 16
+Btn16,,M2,FVWM,Nop
+Btn16,,M3,FVWM,f_FrontPanelPropsMenu 16 $[gt.Empty Launcher]
+
+Btn17,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 17
+Btn17,,M2,FVWM,Nop
+Btn17,,M3,FVWM,f_FrontPanelPropsMenu 17 $[gt.Empty Launcher]
+
+Btn18,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 18
+Btn18,,M2,FVWM,Nop
+Btn18,,M3,FVWM,f_FrontPanelPropsMenu 18 $[gt.Empty Launcher]
+
+Btn19,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 19
+Btn19,,M2,FVWM,Nop
+Btn19,,M3,FVWM,f_FrontPanelPropsMenu 19 $[gt.Empty Launcher]
+
+Btn20,NsCDE/Noicon.l.xpm,M1,FVWM,f_EmptyFrontPanelLauncher 20
+Btn20,,M2,FVWM,Nop
+Btn20,,M3,FVWM,f_FrontPanelPropsMenu 20 $[gt.Empty Launcher]
+
+FpExit,NsCDE/Fpexit.s.pm,M1,FVWM,f_RunQuickScriptDialog SysActionDialog
+FpExit,,M2,FVWM,Nop
+FpExit,,M3,FVWM,Popup m_FrontPanelExitMenu
+
+FpLock,NsCDE/Fplock.s.pm,M1,FVWM,f_Xscreensaver -lock
+FpLock,,M2,FVWM,f_ToggleFvwmFunc xscreensaver-demo Close f_Xscreensaver -prefs
+FpLock,,M3,FVWM,Popup m_FrontPanelLockMenu
+
+FpLite,,M1,FVWM,SendToModule FpLite SendString 1 1 dummystring
+FpLite,,M2,FVWM,Nop
+FpLite,,M3,FVWM,Popup m_FrontPanelLiteMenu
+
+FpPGM,NsCDE/Wsm.xpm,M1,true,true
+FpPGM,,M2,FVWM,f_ToggleFvwmModule FvwmScript WsPgMgr $[infostore.desknum] $[infostore.pagematrixX] $[infostore.pagematrixY]
+FpPGM,,M3,FVWM,Popup m_FrontPanelPGMMenu

@@ -1,0 +1,163 @@
+#!@KSH@
+
+#
+# NsCDE session coordination daemon.
+#
+# Maintains backend-agnostic desktop state and routes shell commands.
+# Uses nscde_backend.shlib for state management and workspace operations.
+#
+
+# Source the shared backend library
+. "@NSCDE_TOOLSDIR@/nscde_backend.shlib"
+
+# Initialize backend environment
+nscde_backend_init || exit 2
+
+# Ensure state directory and FIFO exist
+nscde_state_ensure_dir
+nscde_fifo_ensure
+nscde_fifo_ensure_path "$NSCDE_PAGER_COMMAND_FIFO"
+nscde_fifo_ensure_path "$NSCDE_TOPLEVEL_COMMAND_FIFO"
+
+# Declare backend capabilities
+if [ "$NSCDE_BACKEND" = "labwc" ]; then
+   nscde_caps_labwc
+else
+   nscde_caps_fvwm
+fi
+
+cleanup() {
+   rm -f "$NSCDE_COMMAND_FIFO"
+   rm -f "$NSCDE_PAGER_COMMAND_FIFO"
+   rm -f "$NSCDE_TOPLEVEL_COMMAND_FIFO"
+   rm -f "$NSCDE_PID_FILE"
+   exit 0
+}
+
+trap cleanup INT TERM EXIT
+
+echo $$ > "$NSCDE_PID_FILE"
+
+forward_workspace_switch_to_pager() {
+   if [ ! -p "$NSCDE_PAGER_COMMAND_FIFO" ]; then
+      return 1
+   fi
+   exec 3> "$NSCDE_PAGER_COMMAND_FIFO" || return 1
+   printf 'switch_workspace:%s\n' "$1" >&3 || {
+      exec 3>&-
+      return 1
+   }
+   exec 3>&-
+}
+
+publish_panel_layout() {
+   if [ "${NSCDE_PANEL_LAYOUT_EXTERNAL:-0}" = "1" ] && [ -s "$NSCDE_PANEL_LAYOUT_FILE" ]; then
+      return 0
+   fi
+
+   _runtime_bin="${NSCDE_RUNTIME_BIN:-nscde-runtime}"
+
+   if [ -n "$NSCDE_STATIC_PANEL_LAYOUT_FILE" ] && [ -f "$NSCDE_STATIC_PANEL_LAYOUT_FILE" ]; then
+      if command -v "$_runtime_bin" >/dev/null 2>&1; then
+         if "$_runtime_bin" panel-layout publish "$NSCDE_STATIC_PANEL_LAYOUT_FILE" > "${NSCDE_PANEL_LAYOUT_FILE}.tmp"; then
+            mv "${NSCDE_PANEL_LAYOUT_FILE}.tmp" "$NSCDE_PANEL_LAYOUT_FILE"
+            return 0
+         fi
+         echo "nscde_sessiond: Haskell panel-layout publisher failed, falling back to shell publisher." >&2
+         rm -f "${NSCDE_PANEL_LAYOUT_FILE}.tmp"
+      fi
+   fi
+
+   nscde_panel_layout_publish
+}
+
+# Publish initial state
+nscde_session_publish
+publish_panel_layout
+nscde_panel_publish
+if [ "$NSCDE_BACKEND" != "labwc" ]; then
+   nscde_workspaces_publish
+fi
+nscde_windows_init
+
+while true
+do
+   while IFS= read -r command_line
+   do
+      command_name=${command_line%%:*}
+      command_value=${command_line#*:}
+
+      if [ "x$command_name" = "x$command_line" ]; then
+         continue
+      fi
+
+      case "$command_name" in
+         switch_workspace)
+            if nscde_workspace_exists "$command_value"; then
+               if [ "$NSCDE_BACKEND" = "labwc" ]; then
+                  forward_workspace_switch_to_pager "$command_value"
+               else
+                  NSCDE_CURRENT_WORKSPACE=$command_value
+                  export NSCDE_LABWC_CURRENT_WORKSPACE=$NSCDE_CURRENT_WORKSPACE
+                  nscde_panel_publish
+                  nscde_workspaces_publish
+               fi
+            fi
+            ;;
+         focus_window)
+            nscde_window_focus "$command_value"
+            ;;
+         register_window)
+            # Format: register_window:id:title:workspace
+            _rw_id="${command_value%%:*}"
+            _rw_rest="${command_value#*:}"
+            _rw_title="${_rw_rest%%:*}"
+            _rw_workspace="${_rw_rest#*:}"
+            nscde_window_register "$_rw_id" "$_rw_title" "$_rw_workspace"
+            ;;
+         unregister_window)
+            nscde_window_unregister "$command_value"
+            ;;
+         rename_workspace)
+            # Format: rename_workspace:OldName:NewName
+            _rn_old="${command_value%%:*}"
+            _rn_new="${command_value#*:}"
+            if [ -n "$_rn_old" ] && [ -n "$_rn_new" ] && [ "$_rn_old" != "$_rn_new" ]; then
+               if nscde_workspace_exists "$_rn_old"; then
+                  _rn_list=""
+                  _rn_first=1
+                  old_ifs=$IFS
+                  IFS=,
+                  set -- $NSCDE_WORKSPACES
+                  IFS=$old_ifs
+                  for _rn_ws in "$@"; do
+                     _rn_ws=$(printf '%s' "$_rn_ws" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                     if [ "$_rn_ws" = "$_rn_old" ]; then
+                        _rn_ws="$_rn_new"
+                     fi
+                     if [ $_rn_first -eq 1 ]; then
+                        _rn_list="$_rn_ws"
+                        _rn_first=0
+                     else
+                        _rn_list="$_rn_list,$_rn_ws"
+                     fi
+                  done
+                  NSCDE_WORKSPACES="$_rn_list"
+                  export NSCDE_LABWC_WORKSPACES="$NSCDE_WORKSPACES"
+                  if [ "$NSCDE_CURRENT_WORKSPACE" = "$_rn_old" ]; then
+                     NSCDE_CURRENT_WORKSPACE="$_rn_new"
+                     export NSCDE_LABWC_CURRENT_WORKSPACE="$NSCDE_CURRENT_WORKSPACE"
+                  fi
+                  nscde_panel_publish
+                  if [ "$NSCDE_BACKEND" != "labwc" ]; then
+                     nscde_workspaces_publish
+                  fi
+               fi
+            fi
+            ;;
+         reload)
+            nscde_backend_reload
+            ;;
+      esac
+   done < "$NSCDE_COMMAND_FIFO"
+done

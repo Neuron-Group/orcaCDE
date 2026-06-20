@@ -1,0 +1,24 @@
+#!@KSH@
+
+#
+# NsCDE workspace pager daemon wrapper for labwc backend.
+#
+# This script wraps the compiled nscde_pagerd binary.
+#
+# This file is a part of NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+if [ -z "${OS_PLUS_MACHINE_ARCH:-}" ]; then
+    OS_PLUS_MACHINE_ARCH=$(uname -s)_$(uname -m)
+fi
+
+BIN="${NSCDE_TOOLSDIR}/${OS_PLUS_MACHINE_ARCH}/nscde_pagerd"
+
+if [ ! -x "$BIN" ]; then
+    echo "Error: nscde_pagerd binary not found at $BIN" >&2
+    exit 1
+fi
+
+exec "$BIN" "$@"

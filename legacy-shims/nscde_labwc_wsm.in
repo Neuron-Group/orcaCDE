@@ -1,0 +1,387 @@
+#!@PYTHON@
+
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def state_dir():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1")
+
+
+def env_path():
+    return os.path.join(state_dir(), "panel.env")
+
+
+def workspaces_env_path():
+    return os.path.join(state_dir(), "workspaces.env")
+
+
+def pager_env_path():
+    return os.path.join(state_dir(), "pager.env")
+
+
+def session_fifo_path():
+    return os.path.join(state_dir(), "sessiond.fifo")
+
+
+def pager_fifo_path():
+    state = parse_env_file(workspaces_env_path())
+    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    state = parse_env_file(pager_env_path())
+    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    return os.path.join(state_dir(), "pagerd.fifo")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEWSM {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 100px;
+                min-height: 36px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton[current="true"] {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            QLineEdit {{
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: {bg};
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                padding: 2px 6px;
+                min-width: 80px;
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+def send_fifo_command(cmd):
+    fifo = session_fifo_path()
+    if not os.path.exists(fifo):
+        return
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, (cmd + "\n").encode("utf-8"))
+        os.close(fd)
+    except (OSError, BlockingIOError):
+        pass
+
+
+def send_pager_command(cmd):
+    fifo = pager_fifo_path()
+    if not os.path.exists(fifo):
+        return
+    try:
+        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+        os.write(fd, (cmd + "\n").encode("utf-8"))
+        os.close(fd)
+    except (OSError, BlockingIOError):
+        pass
+
+
+def read_workspaces():
+    state = parse_env_file(workspaces_env_path())
+    ws_list = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
+    count = int(state.get("NSCDE_WORKSPACE_COUNT", "4"))
+    current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
+    names = [n.strip() for n in ws_list.split(",") if n.strip()]
+    return names[:count], current
+
+
+class WorkspaceButton(QPushButton):
+    """A button representing a workspace, with double-click rename."""
+
+    def __init__(self, name, index, is_current, parent_widget, parent=None):
+        super().__init__(name, parent)
+        self.ws_name = name
+        self.ws_index = index
+        self._parent_widget = parent_widget
+        self._update_current(is_current)
+        self.clicked.connect(self._on_switch)
+        self._click_count = 0
+
+    def _update_current(self, is_current):
+        self.setProperty("current", "true" if is_current else "false")
+        self.style().unpolish(self)
+        self.style().polish(self)
+
+    def _on_switch(self):
+        send_pager_command("switch_workspace:{}".format(self.ws_name))
+
+    def mouseDoubleClickEvent(self, event):
+        self._parent_widget._start_rename(self)
+        super().mouseDoubleClickEvent(event)
+
+
+class NsCDEWSM(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Workspace Manager")
+        self.setObjectName("NsCDEWSM")
+        self.setMinimumWidth(360)
+        self.setMinimumHeight(120)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self._buttons = []
+        self._rename_edit = None
+        self._rename_target = None
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._refresh_workspaces()
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh_workspaces)
+        self._timer.start(2000)
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        self._frame_layout = QVBoxLayout(frame)
+        self._frame_layout.setContentsMargins(8, 8, 8, 8)
+        self._frame_layout.setSpacing(6)
+
+        title_row = QHBoxLayout()
+        title = QLabel("Workspace Manager")
+        title.setObjectName("titleLabel")
+        title_row.addWidget(title)
+        title_row.addStretch()
+        self._frame_layout.addLayout(title_row)
+
+        self._ws_area = QHBoxLayout()
+        self._ws_area.setSpacing(4)
+        self._frame_layout.addLayout(self._ws_area)
+
+        self._rename_row = QHBoxLayout()
+        self._rename_label = QLabel("Rename to:")
+        self._rename_label.setVisible(False)
+        self._rename_row.addWidget(self._rename_label)
+        self._rename_edit = QLineEdit()
+        self._rename_edit.setVisible(False)
+        self._rename_edit.returnPressed.connect(self._commit_rename)
+        self._rename_row.addWidget(self._rename_edit)
+        self._rename_cancel = QPushButton("Cancel")
+        self._rename_cancel.setVisible(False)
+        self._rename_cancel.setFixedWidth(70)
+        self._rename_cancel.clicked.connect(self._cancel_rename)
+        self._rename_row.addWidget(self._rename_cancel)
+        self._frame_layout.addLayout(self._rename_row)
+
+        hint = QLabel("Double-click a workspace to rename it")
+        hint.setAlignment(Qt.AlignCenter)
+        self._frame_layout.addWidget(hint)
+
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _refresh_workspaces(self):
+        names, current = read_workspaces()
+
+        if self._rename_edit.isVisible():
+            return
+
+        old_count = len(self._buttons)
+        new_count = len(names)
+        old_names = [b.ws_name for b in self._buttons]
+
+        if old_names == names and old_count == new_count:
+            for btn in self._buttons:
+                btn._update_current(btn.ws_name == current)
+            return
+
+        for btn in self._buttons:
+            btn.setParent(None)
+            btn.deleteLater()
+        self._buttons = []
+
+        for i, name in enumerate(names):
+            btn = WorkspaceButton(name, i, name == current, self, None)
+            self._buttons.append(btn)
+            self._ws_area.addWidget(btn)
+
+    def _start_rename(self, btn):
+        self._rename_target = btn
+        self._rename_edit.setText(btn.ws_name)
+        self._rename_edit.setVisible(True)
+        self._rename_label.setVisible(True)
+        self._rename_cancel.setVisible(True)
+        self._rename_edit.setFocus()
+        self._rename_edit.selectAll()
+
+    def _commit_rename(self):
+        if self._rename_target is None:
+            return
+        old_name = self._rename_target.ws_name
+        new_name = self._rename_edit.text().strip()
+        if new_name and new_name != old_name:
+            send_fifo_command("rename_workspace:{}:{}".format(old_name, new_name))
+        self._cancel_rename()
+
+    def _cancel_rename(self):
+        self._rename_edit.setVisible(False)
+        self._rename_label.setVisible(False)
+        self._rename_cancel.setVisible(False)
+        self._rename_target = None
+
+
+def main():
+    app = QApplication(sys.argv)
+    wsm = NsCDEWSM()
+    wsm.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

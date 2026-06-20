@@ -1,0 +1,102 @@
+#!/bin/sh
+
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# nscde_stylemgr: Native style manager launcher for labwc backend.
+# Launches PyQt5-based style manager dialogs that use normalized state
+# and the backend-agnostic style infrastructure.
+
+PROGNAME="${0##*/}"
+
+run_manager() {
+    _manager_path="$1"
+
+    if [ ! -r "$_manager_path" ]; then
+        echo "Missing manager: $_manager_path" >&2
+        exit 1
+    fi
+
+    _manager_head=$(head -n 1 "$_manager_path" 2>/dev/null)
+    case "$_manager_head" in
+        '#!'*'@PYTHON@'*)
+            _pybin="${PYTHON:-python3}"
+            exec "$_pybin" "$_manager_path"
+            ;;
+        *)
+            exec "$_manager_path"
+            ;;
+    esac
+}
+
+usage() {
+    echo "Usage: ${PROGNAME} <manager>"
+    echo ""
+    echo "Native style manager launcher for the labwc backend."
+    echo ""
+    echo "Managers:"
+    echo "  color      Color/Palette Style Manager"
+    echo "  font       Font Style Manager"
+    echo "  backdrop   Backdrop Style Manager"
+    echo "  window     Window Behavior Style Manager"
+echo "  iconbox    Icon Box (iconified windows)"
+echo "  wsm        Workspace Manager"
+echo "  sysinfo    System Information"
+    echo ""
+    echo "Environment:"
+    echo "  NSCDE_BACKEND     Backend identifier (default: labwc)"
+    echo "  NSCDE_DATADIR     NsCDE data directory"
+    echo "  NSCDE_TOOLSDIR    NsCDE tools directory"
+    echo "  FVWM_USERDIR      NsCDE user config directory"
+    echo "  NSCDE_PALETTE     Current palette name"
+}
+
+if [ -z "$NSCDE_BACKEND" ]; then
+    NSCDE_BACKEND="labwc"
+fi
+
+if [ -z "$NSCDE_TOOLSDIR" ]; then
+    if [ -d "${HOME}/.NsCDE/nscde_tools" ]; then
+        NSCDE_TOOLSDIR="${HOME}/.NsCDE/nscde_tools"
+    elif [ -d "/usr/share/NsCDE/nscde_tools" ]; then
+        NSCDE_TOOLSDIR="/usr/share/NsCDE/nscde_tools"
+    fi
+    export NSCDE_TOOLSDIR
+fi
+
+case "${1:-}" in
+    color)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_colormgr"
+        ;;
+    font)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_fontmgr"
+        ;;
+    backdrop)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_backdropmgr"
+        ;;
+    window)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_windowmgr"
+        ;;
+    iconbox)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_iconbox"
+        ;;
+    sysinfo)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_sysinfo"
+        ;;
+    wsm|desks)
+        run_manager "${NSCDE_TOOLSDIR}/nscde_labwc_wsm"
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        if [ -n "${1:-}" ]; then
+            echo "Unknown manager: ${1}"
+        fi
+        usage
+        exit 1
+        ;;
+esac

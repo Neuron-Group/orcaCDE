@@ -1,0 +1,800 @@
+#!@PYTHON@
+
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QRadioButton,
+    QScrollArea,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def style_env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "style.env")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEWindowMgr {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QGroupBox {{
+                background-color: {sbg};
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                border: 1px solid {sh};
+                margin-top: 12px;
+                padding-top: 10px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }}
+            QComboBox {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                padding: 2px 6px;
+                min-width: 120px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {bg};
+                color: {fg};
+                selection-background-color: {acc};
+                selection-color: #ffffff;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            QCheckBox {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                background-color: {bg};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {acc};
+            }}
+            QRadioButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                spacing: 6px;
+            }}
+            QRadioButton::indicator {{
+                width: 14px;
+                height: 14px;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                background-color: {bg};
+                border-radius: 7px;
+            }}
+            QRadioButton::indicator:checked {{
+                background-color: {acc};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QSlider::groove:horizontal {{
+                border: 1px solid {sh};
+                height: 8px;
+                background: {bg};
+                border-top: 1px solid {sh};
+                border-left: 1px solid {sh};
+                border-right: 1px solid {hi};
+                border-bottom: 1px solid {hi};
+            }}
+            QSlider::handle:horizontal {{
+                background: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+                width: 14px;
+                margin: -4px 0;
+            }}
+            QSlider::handle:horizontal:pressed {{
+                background: {acc};
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+class NsCDEWindowMgr(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Style Manager - Window")
+        self.setObjectName("NsCDEWindowMgr")
+        self.setMinimumSize(520, 580)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self.style_state = parse_env_file(style_env_path())
+        self._changed = {}
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._load_state()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(8)
+
+        title = QLabel("Window Style Manager")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title)
+
+        self.tab_combo = QComboBox()
+        self.tab_combo.addItems([
+            "Window Behavior",
+            "Window Icons",
+            "Page Edges",
+        ])
+        self.tab_combo.currentIndexChanged.connect(self._on_tab_changed)
+        frame_layout.addWidget(self.tab_combo)
+
+        self.tab_stack = QWidget()
+        self.tab_layout = QVBoxLayout(self.tab_stack)
+        self.tab_layout.setContentsMargins(0, 0, 0, 0)
+
+        self._build_behavior_tab()
+        self._build_icons_tab()
+        self._build_edges_tab()
+
+        frame_layout.addWidget(self.tab_stack, 1)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self.tab_stack)
+        scroll.setFrameShape(QFrame.NoFrame)
+        frame_layout.addWidget(scroll, 1)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.clicked.connect(self._on_apply)
+        btn_layout.addWidget(self.apply_btn)
+
+        self.reset_btn = QPushButton("Reset")
+        self.reset_btn.clicked.connect(self._on_reset)
+        btn_layout.addWidget(self.reset_btn)
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.close_btn)
+
+        frame_layout.addLayout(btn_layout)
+        main_layout.addWidget(frame)
+
+        self._tabs = [
+            self._behavior_tab,
+            self._icons_tab,
+            self._edges_tab,
+        ]
+        self._on_tab_changed(0)
+
+    def _build_behavior_tab(self):
+        self._behavior_tab = QWidget()
+        layout = QVBoxLayout(self._behavior_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        focus_group = QGroupBox("Focus Policy")
+        focus_layout = QVBoxLayout(focus_group)
+
+        self.focus_mouse = QRadioButton("Mouse Focus")
+        self.focus_sloppy = QRadioButton("Sloppy Focus")
+        self.focus_click = QRadioButton("Click to Focus")
+        focus_layout.addWidget(self.focus_mouse)
+        focus_layout.addWidget(self.focus_sloppy)
+        focus_layout.addWidget(self.focus_click)
+
+        layout.addWidget(focus_group)
+
+        raise_group = QGroupBox("Auto Raise")
+        raise_layout = QVBoxLayout(raise_group)
+
+        self.auto_raise_cb = QCheckBox("Enable auto-raise of windows")
+        raise_layout.addWidget(self.auto_raise_cb)
+
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel("Raise delay (ms):"))
+        self.raise_delay_slider = QSlider(Qt.Horizontal)
+        self.raise_delay_slider.setMinimum(0)
+        self.raise_delay_slider.setMaximum(10000)
+        self.raise_delay_slider.setSingleStep(100)
+        self.raise_delay_slider.setPageStep(1000)
+        self.raise_delay_label = QLabel("0")
+        self.raise_delay_slider.valueChanged.connect(
+            lambda v: self.raise_delay_label.setText(str(v))
+        )
+        delay_row.addWidget(self.raise_delay_slider, 1)
+        delay_row.addWidget(self.raise_delay_label)
+        raise_layout.addLayout(delay_row)
+
+        layout.addWidget(raise_group)
+
+        transient_group = QGroupBox("Transient Windows")
+        transient_layout = QVBoxLayout(transient_group)
+
+        self.raise_transient_cb = QCheckBox("Raise transient windows with parent")
+        self.lower_transient_cb = QCheckBox("Lower transient windows with parent")
+        self.stack_transient_cb = QCheckBox("Stack transient on parent")
+        transient_layout.addWidget(self.raise_transient_cb)
+        transient_layout.addWidget(self.lower_transient_cb)
+        transient_layout.addWidget(self.stack_transient_cb)
+
+        layout.addWidget(transient_group)
+
+        move_group = QGroupBox("Window Movement")
+        move_layout = QVBoxLayout(move_group)
+
+        opaque_row = QHBoxLayout()
+        opaque_row.addWidget(QLabel("Opaque move size (%):"))
+        self.opaque_move_slider = QSlider(Qt.Horizontal)
+        self.opaque_move_slider.setMinimum(0)
+        self.opaque_move_slider.setMaximum(100)
+        self.opaque_move_label = QLabel("100")
+        self.opaque_move_slider.valueChanged.connect(
+            lambda v: self.opaque_move_label.setText(str(v))
+        )
+        opaque_row.addWidget(self.opaque_move_slider, 1)
+        opaque_row.addWidget(self.opaque_move_label)
+        move_layout.addLayout(opaque_row)
+
+        threshold_row = QHBoxLayout()
+        threshold_row.addWidget(QLabel("Move threshold (px):"))
+        self.move_threshold_slider = QSlider(Qt.Horizontal)
+        self.move_threshold_slider.setMinimum(0)
+        self.move_threshold_slider.setMaximum(100)
+        self.move_threshold_label = QLabel("0")
+        self.move_threshold_slider.valueChanged.connect(
+            lambda v: self.move_threshold_label.setText(str(v))
+        )
+        threshold_row.addWidget(self.move_threshold_slider, 1)
+        threshold_row.addWidget(self.move_threshold_label)
+        move_layout.addLayout(threshold_row)
+
+        layout.addWidget(move_group)
+        layout.addStretch()
+
+    def _build_icons_tab(self):
+        self._icons_tab = QWidget()
+        layout = QVBoxLayout(self._icons_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        place_group = QGroupBox("Icon Placement")
+        place_layout = QVBoxLayout(place_group)
+
+        self.icon_box_radio = QRadioButton("Use Icon Box")
+        self.icon_desk_radio = QRadioButton("Place on Workspace")
+        place_layout.addWidget(self.icon_box_radio)
+        place_layout.addWidget(self.icon_desk_radio)
+
+        layout.addWidget(place_group)
+
+        fill_group = QGroupBox("Icon Fill Direction")
+        fill_layout = QVBoxLayout(fill_group)
+
+        self.fill_bl = QRadioButton("Bottom-Left")
+        self.fill_tl = QRadioButton("Top-Left")
+        self.fill_br = QRadioButton("Bottom-Right")
+        self.fill_tr = QRadioButton("Top-Right")
+        fill_layout.addWidget(self.fill_bl)
+        fill_layout.addWidget(self.fill_tl)
+        fill_layout.addWidget(self.fill_br)
+        fill_layout.addWidget(self.fill_tr)
+
+        layout.addWidget(fill_group)
+
+        size_group = QGroupBox("Icon Size")
+        size_layout = QVBoxLayout(size_group)
+
+        def_size_row = QHBoxLayout()
+        def_size_row.addWidget(QLabel("Default size (px):"))
+        self.def_icon_size_slider = QSlider(Qt.Horizontal)
+        self.def_icon_size_slider.setMinimum(16)
+        self.def_icon_size_slider.setMaximum(96)
+        self.def_icon_size_label = QLabel("48")
+        self.def_icon_size_slider.valueChanged.connect(
+            lambda v: self.def_icon_size_label.setText(str(v))
+        )
+        def_size_row.addWidget(self.def_icon_size_slider, 1)
+        def_size_row.addWidget(self.def_icon_size_label)
+        size_layout.addLayout(def_size_row)
+
+        max_size_row = QHBoxLayout()
+        max_size_row.addWidget(QLabel("Max size (px):"))
+        self.max_icon_size_slider = QSlider(Qt.Horizontal)
+        self.max_icon_size_slider.setMinimum(18)
+        self.max_icon_size_slider.setMaximum(128)
+        self.max_icon_size_label = QLabel("128")
+        self.max_icon_size_slider.valueChanged.connect(
+            lambda v: self.max_icon_size_label.setText(str(v))
+        )
+        max_size_row.addWidget(self.max_icon_size_slider, 1)
+        max_size_row.addWidget(self.max_icon_size_label)
+        size_layout.addLayout(max_size_row)
+
+        layout.addWidget(size_group)
+        layout.addStretch()
+
+    def _build_edges_tab(self):
+        self._edges_tab = QWidget()
+        layout = QVBoxLayout(self._edges_tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        pager_group = QGroupBox("Pager Behavior")
+        pager_layout = QVBoxLayout(pager_group)
+
+        self.raise_fp_cb = QCheckBox("Raise Front Panel on page change")
+        self.pager_preview_cb = QCheckBox("Show pager preview on page change")
+        pager_layout.addWidget(self.raise_fp_cb)
+        pager_layout.addWidget(self.pager_preview_cb)
+
+        layout.addWidget(pager_group)
+
+        thickness_group = QGroupBox("Edge Thickness")
+        thickness_layout = QVBoxLayout(thickness_group)
+
+        self.edge_0 = QRadioButton("0 px (no edge)")
+        self.edge_1 = QRadioButton("1 px")
+        self.edge_2 = QRadioButton("2 px")
+        thickness_layout.addWidget(self.edge_0)
+        thickness_layout.addWidget(self.edge_1)
+        thickness_layout.addWidget(self.edge_2)
+
+        layout.addWidget(thickness_group)
+
+        resist_group = QGroupBox("Edge Resistance")
+        resist_layout = QVBoxLayout(resist_group)
+
+        resist_row = QHBoxLayout()
+        resist_row.addWidget(QLabel("Resistance:"))
+        self.edge_resistance_slider = QSlider(Qt.Horizontal)
+        self.edge_resistance_slider.setMinimum(0)
+        self.edge_resistance_slider.setMaximum(10000)
+        self.edge_resistance_label = QLabel("0")
+        self.edge_resistance_slider.valueChanged.connect(
+            lambda v: self.edge_resistance_label.setText(str(v))
+        )
+        resist_row.addWidget(self.edge_resistance_slider, 1)
+        resist_row.addWidget(self.edge_resistance_label)
+        resist_layout.addLayout(resist_row)
+
+        move_resist_row = QHBoxLayout()
+        move_resist_row.addWidget(QLabel("Move resistance:"))
+        self.edge_move_resistance_slider = QSlider(Qt.Horizontal)
+        self.edge_move_resistance_slider.setMinimum(0)
+        self.edge_move_resistance_slider.setMaximum(100)
+        self.edge_move_resistance_label = QLabel("0")
+        self.edge_move_resistance_slider.valueChanged.connect(
+            lambda v: self.edge_move_resistance_label.setText(str(v))
+        )
+        move_resist_row.addWidget(self.edge_move_resistance_slider, 1)
+        move_resist_row.addWidget(self.edge_move_resistance_label)
+        resist_layout.addLayout(move_resist_row)
+
+        delay_row = QHBoxLayout()
+        delay_row.addWidget(QLabel("Move delay (ms):"))
+        self.edge_move_delay_slider = QSlider(Qt.Horizontal)
+        self.edge_move_delay_slider.setMinimum(0)
+        self.edge_move_delay_slider.setMaximum(10000)
+        self.edge_move_delay_label = QLabel("0")
+        self.edge_move_delay_slider.valueChanged.connect(
+            lambda v: self.edge_move_delay_label.setText(str(v))
+        )
+        delay_row.addWidget(self.edge_move_delay_slider, 1)
+        delay_row.addWidget(self.edge_move_delay_label)
+        resist_layout.addLayout(delay_row)
+
+        layout.addWidget(resist_group)
+        layout.addStretch()
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _on_tab_changed(self, index):
+        for i in range(self.tab_layout.count()):
+            w = self.tab_layout.itemAt(i).widget()
+            if w:
+                w.hide()
+        if 0 <= index < len(self._tabs):
+            self._tabs[index].show()
+
+    def _load_state(self):
+        s = self.style_state
+
+        focus = s.get("NSCDE_FOCUS_POLICY", "MouseFocus")
+        if focus == "ClickToFocus":
+            self.focus_click.setChecked(True)
+        elif focus == "SloppyFocus":
+            self.focus_sloppy.setChecked(True)
+        else:
+            self.focus_mouse.setChecked(True)
+
+        self.auto_raise_cb.setChecked(s.get("NSCDE_AUTO_RAISE", "0") == "1")
+        self.raise_delay_slider.setValue(int(s.get("NSCDE_RAISE_DELAY", "0")))
+        self.raise_transient_cb.setChecked(
+            s.get("NSCDE_RAISE_TRANSIENT", "1") == "1"
+        )
+        self.lower_transient_cb.setChecked(
+            s.get("NSCDE_LOWER_TRANSIENT", "1") == "1"
+        )
+        self.stack_transient_cb.setChecked(
+            s.get("NSCDE_STACK_TRANSIENT", "1") == "1"
+        )
+        self.opaque_move_slider.setValue(int(s.get("NSCDE_OPAQUE_MOVE", "100")))
+        self.move_threshold_slider.setValue(
+            int(s.get("NSCDE_MOVE_THRESHOLD", "0"))
+        )
+
+        icon_place = s.get("NSCDE_ICON_PLACEMENT", "0")
+        if icon_place == "1":
+            self.icon_box_radio.setChecked(True)
+        else:
+            self.icon_desk_radio.setChecked(True)
+
+        icon_fill = s.get("NSCDE_ICON_FILL", "bottom.left")
+        fill_map = {
+            "bottom.left": self.fill_bl,
+            "top.left": self.fill_tl,
+            "bottom.right": self.fill_br,
+            "top.right": self.fill_tr,
+        }
+        fill_map.get(icon_fill, self.fill_bl).setChecked(True)
+
+        icon_size = s.get("NSCDE_ICON_SIZE", "48,48,128,128")
+        parts = icon_size.split(",")
+        if len(parts) >= 4:
+            self.def_icon_size_slider.setValue(int(parts[0]))
+            self.max_icon_size_slider.setValue(int(parts[2]))
+
+        self.raise_fp_cb.setChecked(s.get("NSCDE_RAISE_FP_ON_PAGE", "0") == "1")
+        self.pager_preview_cb.setChecked(
+            s.get("NSCDE_PAGER_PREVIEW", "0") == "1"
+        )
+
+        edge_t = s.get("NSCDE_EDGE_THICKNESS", "0")
+        if edge_t == "2":
+            self.edge_2.setChecked(True)
+        elif edge_t == "1":
+            self.edge_1.setChecked(True)
+        else:
+            self.edge_0.setChecked(True)
+
+        self.edge_resistance_slider.setValue(
+            int(s.get("NSCDE_EDGE_RESISTANCE", "0"))
+        )
+        self.edge_move_resistance_slider.setValue(
+            int(s.get("NSCDE_EDGE_MOVE_RESISTANCE", "0"))
+        )
+        self.edge_move_delay_slider.setValue(
+            int(s.get("NSCDE_EDGE_MOVE_DELAY", "0"))
+        )
+
+    def _get_focus_policy(self):
+        if self.focus_click.isChecked():
+            return "ClickToFocus"
+        if self.focus_sloppy.isChecked():
+            return "SloppyFocus"
+        return "MouseFocus"
+
+    def _get_icon_fill(self):
+        if self.fill_tl.isChecked():
+            return "top.left"
+        if self.fill_br.isChecked():
+            return "bottom.right"
+        if self.fill_tr.isChecked():
+            return "top.right"
+        return "bottom.left"
+
+    def _get_edge_thickness(self):
+        if self.edge_2.isChecked():
+            return "2"
+        if self.edge_1.isChecked():
+            return "1"
+        return "0"
+
+    def _on_apply(self):
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setText("Applying...")
+        QApplication.processEvents()
+
+        try:
+            toolsdir = nscde_toolsdir()
+            backend = os.environ.get("NSCDE_BACKEND", "labwc")
+
+            env = dict(os.environ)
+            env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+            env.setdefault("NSCDE_DATADIR", nscde_datadir())
+            env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+            env.setdefault("NSCDE_BACKEND", backend)
+
+            shlib = os.path.join(toolsdir, "style_managers.shlib")
+            if not os.path.exists(shlib):
+                return
+
+            calls = []
+
+            focus = self._get_focus_policy()
+            calls.append('nscde_style_set_focus_policy "{}"'.format(focus))
+
+            auto_raise = "1" if self.auto_raise_cb.isChecked() else "0"
+            calls.append('nscde_style_set_auto_raise "{}"'.format(auto_raise))
+
+            calls.append(
+                'nscde_style_set_raise_delay "{}"'.format(
+                    self.raise_delay_slider.value()
+                )
+            )
+
+            raise_t = "1" if self.raise_transient_cb.isChecked() else "0"
+            calls.append('nscde_style_set_raise_transient "{}"'.format(raise_t))
+
+            lower_t = "1" if self.lower_transient_cb.isChecked() else "0"
+            calls.append('nscde_style_set_lower_transient "{}"'.format(lower_t))
+
+            stack_t = "1" if self.stack_transient_cb.isChecked() else "0"
+            calls.append('nscde_style_set_stack_transient "{}"'.format(stack_t))
+
+            calls.append(
+                'nscde_style_set_opaque_move "{}"'.format(
+                    self.opaque_move_slider.value()
+                )
+            )
+
+            calls.append(
+                'nscde_style_set_move_threshold "{}"'.format(
+                    self.move_threshold_slider.value()
+                )
+            )
+
+            icon_place = "1" if self.icon_box_radio.isChecked() else "0"
+            calls.append('nscde_style_set_icon_placement "{}"'.format(icon_place))
+
+            calls.append(
+                'nscde_style_set_icon_fill "{}"'.format(self._get_icon_fill())
+            )
+
+            def_size = self.def_icon_size_slider.value()
+            max_size = self.max_icon_size_slider.value()
+            calls.append(
+                'nscde_style_set_icon_size "{},{},{},{}"'.format(
+                    def_size, def_size, max_size, max_size
+                )
+            )
+
+            raise_fp = "1" if self.raise_fp_cb.isChecked() else "0"
+            calls.append('nscde_style_set_raise_fp_on_page "{}"'.format(raise_fp))
+
+            pager_prev = "1" if self.pager_preview_cb.isChecked() else "0"
+            calls.append('nscde_style_set_pager_preview "{}"'.format(pager_prev))
+
+            calls.append(
+                'nscde_style_set_edge_thickness "{}"'.format(
+                    self._get_edge_thickness()
+                )
+            )
+
+            calls.append(
+                'nscde_style_set_edge_resistance "{}"'.format(
+                    self.edge_resistance_slider.value()
+                )
+            )
+
+            calls.append(
+                'nscde_style_set_edge_move_resistance "{}"'.format(
+                    self.edge_move_resistance_slider.value()
+                )
+            )
+
+            calls.append(
+                'nscde_style_set_edge_move_delay "{}"'.format(
+                    self.edge_move_delay_slider.value()
+                )
+            )
+
+            calls.append("nscde_style_backend_apply")
+
+            cmd = '. "{shlib}" && {calls}'.format(
+                shlib=shlib,
+                calls=" && ".join(calls),
+            )
+            try:
+                subprocess.run(
+                    ["ksh", "-c", cmd],
+                    capture_output=True,
+                    timeout=30,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+
+            self.style_state = parse_env_file(style_env_path())
+
+        finally:
+            self.apply_btn.setEnabled(True)
+            self.apply_btn.setText("Apply")
+
+    def _on_reset(self):
+        self.style_state = {}
+        self._load_state()
+
+
+def main():
+    app = QApplication(sys.argv)
+    mgr = NsCDEWindowMgr()
+    mgr.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

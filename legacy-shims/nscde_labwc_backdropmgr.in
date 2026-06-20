@@ -1,0 +1,700 @@
+#!@PYTHON@
+
+import glob
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QPixmap
+from PyQt5.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def debug_log_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "style-debug.log")
+
+
+def append_debug_log(title, text):
+    path = debug_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("== {} ==\n{}\n\n".format(title, text))
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def find_backdrops():
+    sys_dir = os.path.join(nscde_datadir(), "backdrops")
+    user_dir = os.path.join(nscde_fvwm_userdir(), "backdrops")
+
+    backdrops = []
+    for d in [sys_dir, user_dir]:
+        if os.path.isdir(d):
+            for path in sorted(glob.glob(os.path.join(d, "*.pm"))):
+                name = os.path.splitext(os.path.basename(path))[0]
+                backdrops.append((name, path))
+    return backdrops
+
+
+def find_photos():
+    sys_dir = os.path.join(nscde_datadir(), "photos")
+    user_dir = os.path.join(nscde_fvwm_userdir(), "photos")
+
+    photos = []
+    for d in [sys_dir, user_dir]:
+        if os.path.isdir(d):
+            for path in sorted(glob.glob(os.path.join(d, "*.png"))):
+                name = os.path.splitext(os.path.basename(path))[0]
+                photos.append((name, path))
+    return photos
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEBackdropMgr {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QGroupBox {{
+                background-color: {sbg};
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                border: 1px solid {sh};
+                margin-top: 12px;
+                padding-top: 10px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }}
+            QListWidget {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 2px 4px;
+            }}
+            QListWidget::item:selected {{
+                background-color: {acc};
+                color: #ffffff;
+            }}
+            QListWidget::item:hover {{
+                background-color: {hi};
+                color: {fg};
+            }}
+            QComboBox {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                padding: 2px 6px;
+                min-width: 120px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {bg};
+                color: {fg};
+                selection-background-color: {acc};
+                selection-color: #ffffff;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QLabel#previewLabel {{
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                min-height: 120px;
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+class NsCDEBackdropMgr(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Style Manager - Backdrop")
+        self.setObjectName("NsCDEBackdropMgr")
+        self.setMinimumSize(480, 520)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self.backdrops = find_backdrops()
+        self.photos = find_photos()
+        self.selected_backdrop_path = None
+        self.selected_photo_path = None
+        self.current_desk = 1
+        self.ncolors = 8
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._load_lists()
+        self._detect_current_desk()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(8)
+
+        title = QLabel("Backdrop Style Manager")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title)
+
+        desk_row = QHBoxLayout()
+        desk_label = QLabel("Workspace:")
+        desk_row.addWidget(desk_label)
+
+        self.desk_combo = QComboBox()
+        self.desk_combo.addItems(
+            ["1", "2", "3", "4", "5", "6", "7", "8"]
+        )
+        self.desk_combo.setCurrentIndex(0)
+        self.desk_combo.currentTextChanged.connect(self._on_desk_changed)
+        desk_row.addWidget(self.desk_combo)
+        desk_row.addStretch()
+
+        frame_layout.addLayout(desk_row)
+
+        tabs_row = QHBoxLayout()
+        self.backdrop_tab_btn = QPushButton("Backdrops")
+        self.backdrop_tab_btn.clicked.connect(self._show_backdrops)
+        self.backdrop_tab_btn.setDown(True)
+        tabs_row.addWidget(self.backdrop_tab_btn)
+
+        self.photo_tab_btn = QPushButton("Photos")
+        self.photo_tab_btn.clicked.connect(self._show_photos)
+        tabs_row.addWidget(self.photo_tab_btn)
+        tabs_row.addStretch()
+
+        frame_layout.addLayout(tabs_row)
+
+        list_group = QGroupBox("Backdrop Patterns")
+        self.list_group = list_group
+        list_layout = QVBoxLayout(list_group)
+
+        self.backdrop_list = QListWidget()
+        self.backdrop_list.currentRowChanged.connect(self._on_backdrop_selected)
+        list_layout.addWidget(self.backdrop_list)
+
+        self.photo_list = QListWidget()
+        self.photo_list.currentRowChanged.connect(self._on_photo_selected)
+        self.photo_list.hide()
+        list_layout.addWidget(self.photo_list)
+
+        frame_layout.addWidget(list_group)
+
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        self.preview_label = QLabel("Select a backdrop to preview")
+        self.preview_label.setObjectName("previewLabel")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setMinimumHeight(120)
+        preview_layout.addWidget(self.preview_label)
+
+        self.backdrop_name_label = QLabel("")
+        self.backdrop_name_label.setAlignment(Qt.AlignCenter)
+        preview_layout.addWidget(self.backdrop_name_label)
+
+        frame_layout.addWidget(preview_group)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.clicked.connect(self._on_apply)
+        btn_layout.addWidget(self.apply_btn)
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.close_btn)
+
+        frame_layout.addLayout(btn_layout)
+        main_layout.addWidget(frame)
+
+        self._showing_backdrops = True
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _load_lists(self):
+        self.backdrop_list.clear()
+        seen = set()
+        for name, path in self.backdrops:
+            if name not in seen:
+                seen.add(name)
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, path)
+                self.backdrop_list.addItem(item)
+
+        self.photo_list.clear()
+        seen = set()
+        for name, path in self.photos:
+            if name not in seen:
+                seen.add(name)
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, path)
+                self.photo_list.addItem(item)
+
+    def _detect_current_desk(self):
+        state = parse_env_file(env_path())
+        workspaces = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
+        current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
+        names = [n.strip() for n in workspaces.split(",") if n.strip()]
+        try:
+            idx = names.index(current)
+            self.desk_combo.setCurrentIndex(idx)
+            self.current_desk = idx + 1
+        except ValueError:
+            self.current_desk = 1
+
+    def _on_desk_changed(self, text):
+        try:
+            self.current_desk = int(text)
+        except ValueError:
+            self.current_desk = 1
+
+    def _show_backdrops(self):
+        self._showing_backdrops = True
+        self.backdrop_list.show()
+        self.photo_list.hide()
+        self.list_group.setTitle("Backdrop Patterns")
+        self.backdrop_tab_btn.setDown(True)
+        self.photo_tab_btn.setDown(False)
+
+    def _show_photos(self):
+        self._showing_backdrops = False
+        self.backdrop_list.hide()
+        self.photo_list.show()
+        self.list_group.setTitle("Photos")
+        self.backdrop_tab_btn.setDown(False)
+        self.photo_tab_btn.setDown(True)
+
+    def _on_backdrop_selected(self, row):
+        if row < 0:
+            return
+        item = self.backdrop_list.item(row)
+        if item is None:
+            return
+        self.selected_backdrop_path = item.data(Qt.UserRole)
+        self.selected_photo_path = None
+        self.backdrop_name_label.setText(item.text())
+        self._generate_preview(self.selected_backdrop_path, is_photo=False)
+
+    def _on_photo_selected(self, row):
+        if row < 0:
+            return
+        item = self.photo_list.item(row)
+        if item is None:
+            return
+        self.selected_photo_path = item.data(Qt.UserRole)
+        self.selected_backdrop_path = None
+        self.backdrop_name_label.setText(item.text())
+        self._generate_preview(self.selected_photo_path, is_photo=True)
+
+    def _generate_preview(self, source_path, is_photo=False):
+        toolsdir = nscde_toolsdir()
+        env = dict(os.environ)
+        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+        env.setdefault("NSCDE_DATADIR", nscde_datadir())
+        env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+
+        palette_path = None
+        state = parse_env_file(env_path())
+        for key in ["NSCDE_PALETTE_FILE"]:
+            val = state.get(key, "")
+            if val and os.path.exists(val):
+                palette_path = val
+                break
+
+        if not palette_path:
+            current_pal = os.environ.get("NSCDE_PALETTE", "Charcoal")
+            for d in [
+                os.path.join(nscde_fvwm_userdir(), "palettes"),
+                os.path.join(nscde_datadir(), "palettes"),
+            ]:
+                p = os.path.join(d, "{}.dp".format(current_pal))
+                if os.path.exists(p):
+                    palette_path = p
+                    break
+
+        if not palette_path:
+            palette_path = os.path.join(nscde_datadir(), "palettes", "Charcoal.dp")
+
+        color_variant = self._get_color_variant()
+
+        tmp_dir = os.path.join(nscde_fvwm_userdir(), "tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_path = os.path.join(tmp_dir, "backdrop-preview.pm")
+
+        try:
+            if is_photo:
+                cmd = [
+                    "convert", "-resize", "260",
+                    source_path, tmp_path.replace(".pm", ".png"),
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=10, env=env,
+                )
+                if result.returncode == 0:
+                    tmp_path = tmp_path.replace(".pm", ".png")
+                else:
+                    return
+            else:
+                cmd = [
+                    os.path.join(toolsdir, "palette_colorgen"),
+                    "-p", palette_path,
+                    "-n", str(self.ncolors),
+                    "-i", source_path,
+                    "-P", str(color_variant),
+                    "-b",
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=10, env=env,
+                )
+                if result.returncode != 0:
+                    return
+                with open(tmp_path, "wb") as f:
+                    f.write(result.stdout)
+
+            pixmap = QPixmap(tmp_path)
+            if not pixmap.isNull():
+                scaled = pixmap.scaled(
+                    self.preview_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+                self.preview_label.setPixmap(scaled)
+            else:
+                self.preview_label.setText("(preview not available)")
+
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            self.preview_label.setText("(preview generation failed)")
+
+    def _get_color_variant(self):
+        if self.ncolors == 4:
+            return 3
+        desk = self.current_desk
+        variants = {1: 3, 2: 5, 3: 6, 4: 7, 5: 3, 6: 5, 7: 6, 8: 7}
+        return variants.get(desk, 3)
+
+    def _on_apply(self):
+        if self._showing_backdrops:
+            source_path = self.selected_backdrop_path
+            mode = "tiled"
+        else:
+            source_path = self.selected_photo_path
+            mode = "photo"
+
+        if not source_path:
+            return
+
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setText("Applying...")
+        QApplication.processEvents()
+
+        try:
+            toolsdir = nscde_toolsdir()
+            backend = os.environ.get("NSCDE_BACKEND", "labwc")
+
+            env = dict(os.environ)
+            env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+            env.setdefault("NSCDE_DATADIR", nscde_datadir())
+            env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+            env.setdefault("NSCDE_BACKEND", backend)
+
+            palette_path = None
+            state = parse_env_file(env_path())
+            for key in ["NSCDE_PALETTE_FILE"]:
+                val = state.get(key, "")
+                if val and os.path.exists(val):
+                    palette_path = val
+                    break
+
+            if not palette_path:
+                current_pal = os.environ.get("NSCDE_PALETTE", "Charcoal")
+                for d in [
+                    os.path.join(nscde_fvwm_userdir(), "palettes"),
+                    os.path.join(nscde_datadir(), "palettes"),
+                ]:
+                    p = os.path.join(d, "{}.dp".format(current_pal))
+                    if os.path.exists(p):
+                        palette_path = p
+                        break
+
+            if not palette_path:
+                palette_path = os.path.join(
+                    nscde_datadir(), "palettes", "Charcoal.dp"
+                )
+
+            backer_dir = os.path.join(nscde_fvwm_userdir(), "backer")
+            os.makedirs(backer_dir, exist_ok=True)
+
+            backdrop_name = os.path.splitext(os.path.basename(source_path))[0]
+            dest_name = "Desk{}-{}.pm".format(self.current_desk, backdrop_name)
+            dest_path = os.path.join(backer_dir, dest_name)
+
+            color_variant = self._get_color_variant()
+
+            if self._showing_backdrops:
+                cmd = [
+                    os.path.join(toolsdir, "palette_colorgen"),
+                    "-p", palette_path,
+                    "-n", str(self.ncolors),
+                    "-i", source_path,
+                    "-P", str(color_variant),
+                    "-b",
+                ]
+                result = subprocess.run(
+                    cmd, capture_output=True, timeout=30, env=env,
+                )
+                if result.returncode == 0:
+                    with open(dest_path, "wb") as f:
+                        f.write(result.stdout)
+            else:
+                import shutil
+
+                shutil.copy2(source_path, dest_path)
+
+            shlib = os.path.join(toolsdir, "style_managers.shlib")
+            if os.path.exists(shlib):
+                cmd = (
+                    '. "{shlib}" && '
+                    'nscde_style_record_backdrop "{desk}" "{mode}" "{image}"'
+                ).format(
+                    shlib=shlib,
+                    desk=self.current_desk,
+                    mode=mode,
+                    image=backdrop_name,
+                )
+                try:
+                    result = subprocess.run(
+                        ["ksh", "-c", cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        env=env,
+                    )
+                    if result.returncode != 0:
+                        append_debug_log(
+                            "backdrop record",
+                            "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
+                                cmd, result.returncode, result.stdout, result.stderr
+                            ),
+                        )
+                        QMessageBox.warning(
+                            self,
+                            "Apply Error",
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                            or "Failed to record backdrop selection",
+                        )
+                        return
+                except subprocess.TimeoutExpired:
+                    append_debug_log("backdrop record", "timeout running: {}".format(cmd))
+                    QMessageBox.warning(self, "Apply Error", "Timed out while recording backdrop")
+                    return
+
+            if backend == "labwc":
+                apply_cmd = (
+                    '. "{shlib}" && nscde_style_backend_apply'
+                ).format(shlib=shlib)
+                try:
+                    result = subprocess.run(
+                        ["ksh", "-c", apply_cmd],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        env=env,
+                    )
+                    if result.returncode != 0:
+                        append_debug_log(
+                            "backdrop apply",
+                            "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
+                                apply_cmd, result.returncode, result.stdout, result.stderr
+                            ),
+                        )
+                        QMessageBox.warning(
+                            self,
+                            "Apply Error",
+                            result.stderr.strip()
+                            or result.stdout.strip()
+                            or "Failed to apply backdrop",
+                        )
+                except subprocess.TimeoutExpired:
+                    append_debug_log("backdrop apply", "timeout running: {}".format(apply_cmd))
+                    QMessageBox.warning(self, "Apply Error", "Timed out while applying backdrop")
+
+        finally:
+            self.apply_btn.setEnabled(True)
+            self.apply_btn.setText("Apply")
+
+
+def main():
+    app = QApplication(sys.argv)
+    mgr = NsCDEBackdropMgr()
+    mgr.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

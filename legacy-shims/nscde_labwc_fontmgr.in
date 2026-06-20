@@ -1,0 +1,573 @@
+#!@PYTHON@
+
+import glob
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QFont
+from PyQt5.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+FONT_SLOTS = [
+    ("VARIABLE_NORMAL_SMALL", "Variable Normal Small"),
+    ("VARIABLE_BOLD_SMALL", "Variable Bold Small"),
+    ("VARIABLE_ITALIC_SMALL", "Variable Italic Small"),
+    ("MONOSPACED_NORMAL_SMALL", "Mono Normal Small"),
+    ("MONOSPACED_BOLD_SMALL", "Mono Bold Small"),
+    ("VARIABLE_NORMAL_MEDIUM", "Variable Normal Medium"),
+    ("VARIABLE_BOLD_MEDIUM", "Variable Bold Medium"),
+    ("VARIABLE_ITALIC_MEDIUM", "Variable Italic Medium"),
+    ("MONOSPACED_NORMAL_MEDIUM", "Mono Normal Medium"),
+    ("MONOSPACED_BOLD_MEDIUM", "Mono Bold Medium"),
+    ("VARIABLE_NORMAL_LARGE", "Variable Normal Large"),
+    ("VARIABLE_BOLD_LARGE", "Variable Bold Large"),
+    ("VARIABLE_ITALIC_LARGE", "Variable Italic Large"),
+    ("MONOSPACED_NORMAL_LARGE", "Mono Normal Large"),
+    ("MONOSPACED_BOLD_LARGE", "Mono Bold Large"),
+]
+
+PREVIEW_SLOTS = [
+    ("VARIABLE_NORMAL_MEDIUM", "Variable Regular"),
+    ("VARIABLE_BOLD_MEDIUM", "Variable Bold"),
+    ("VARIABLE_ITALIC_MEDIUM", "Variable Italic"),
+    ("MONOSPACED_NORMAL_MEDIUM", "Mono Regular"),
+    ("MONOSPACED_BOLD_MEDIUM", "Mono Bold"),
+]
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def find_fontsets():
+    sys_dir = os.path.join(nscde_datadir(), "fontsets")
+    user_dir = os.path.join(nscde_fvwm_userdir(), "fontsets")
+
+    fontsets = []
+    for d in [sys_dir, user_dir]:
+        if os.path.isdir(d):
+            for path in sorted(glob.glob(os.path.join(d, "*.fontset"))):
+                name = os.path.splitext(os.path.basename(path))[0]
+                fontsets.append((name, path))
+    return fontsets
+
+
+def parse_fontset_file(path):
+    fonts = {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("InfoStoreAdd "):
+                    rest = line[len("InfoStoreAdd "):]
+                    if " " in rest:
+                        key, value = rest.split(" ", 1)
+                        value = value.strip('"')
+                        fonts[key] = value
+                elif "=" in line and line.startswith("font."):
+                    key, value = line.split("=", 1)
+                    fonts[key] = value
+    except OSError:
+        pass
+    return fonts
+
+
+def fontset_key_to_slot(key):
+    parts = key.split(".")
+    if len(parts) >= 4:
+        spacing = parts[1].upper()
+        weight = parts[2].upper()
+        size = parts[3].upper()
+        return "{}_{}_{}".format(spacing, weight, size)
+    return None
+
+
+def xft_to_qfont(xft_str):
+    parts = xft_str.split(":")
+    family = parts[1] if len(parts) > 1 else "Sans"
+    style = parts[3] if len(parts) > 3 else "Roman"
+    size_str = parts[4] if len(parts) > 4 else "size=11"
+
+    size = 11
+    if size_str.startswith("size="):
+        try:
+            size = int(size_str[5:])
+        except ValueError:
+            size = 11
+    elif size_str.startswith("pixelsize="):
+        try:
+            size = int(size_str[10:])
+        except ValueError:
+            size = 11
+
+    qf = QFont(family, size)
+    if "Bold" in style:
+        qf.setBold(True)
+    if "Italic" in style or "Oblique" in style:
+        qf.setItalic(True)
+    return qf
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEFontMgr {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QGroupBox {{
+                background-color: {sbg};
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                border: 1px solid {sh};
+                margin-top: 12px;
+                padding-top: 10px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }}
+            QListWidget {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 2px 4px;
+            }}
+            QListWidget::item:selected {{
+                background-color: {acc};
+                color: #ffffff;
+            }}
+            QListWidget::item:hover {{
+                background-color: {hi};
+                color: {fg};
+            }}
+            QComboBox {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                padding: 2px 6px;
+                min-width: 120px;
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {bg};
+                color: {fg};
+                selection-background-color: {acc};
+                selection-color: #ffffff;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QLabel#previewLabel {{
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                padding: 4px 8px;
+                min-height: 24px;
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+class NsCDEFontMgr(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Style Manager - Font")
+        self.setObjectName("NsCDEFontMgr")
+        self.setMinimumSize(530, 600)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self.fontsets = find_fontsets()
+        self.selected_fontset_path = None
+        self.selected_fontset_fonts = {}
+        self.current_size_group = "MEDIUM"
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._load_fontset_list()
+        self._detect_current_fontset()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(8)
+
+        title = QLabel("Font Style Manager")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title)
+
+        fontset_group = QGroupBox("Fontsets")
+        fontset_layout = QVBoxLayout(fontset_group)
+
+        self.fontset_list = QListWidget()
+        self.fontset_list.currentRowChanged.connect(self._on_fontset_selected)
+        fontset_layout.addWidget(self.fontset_list)
+
+        frame_layout.addWidget(fontset_group)
+
+        size_group = QGroupBox("Size Group")
+        size_layout = QHBoxLayout(size_group)
+
+        self.size_combo = QComboBox()
+        self.size_combo.addItems(["Small", "Medium", "Large"])
+        self.size_combo.setCurrentIndex(1)
+        self.size_combo.currentTextChanged.connect(self._on_size_group_changed)
+        size_layout.addWidget(self.size_combo)
+        size_layout.addStretch()
+
+        frame_layout.addWidget(size_group)
+
+        preview_group = QGroupBox("Font Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        self.preview_labels = []
+        for slot_key, slot_name in PREVIEW_SLOTS:
+            row = QHBoxLayout()
+            name_label = QLabel(slot_name)
+            name_label.setFixedWidth(120)
+            row.addWidget(name_label)
+
+            preview_label = QLabel("Quick Brown Fox Jumps Over Lazy Dog")
+            preview_label.setObjectName("previewLabel")
+            self.preview_labels.append((slot_key, preview_label))
+            row.addWidget(preview_label, 1)
+
+            preview_layout.addLayout(row)
+
+        frame_layout.addWidget(preview_group)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.apply_btn = QPushButton("Save")
+        self.apply_btn.clicked.connect(self._on_save)
+        btn_layout.addWidget(self.apply_btn)
+
+        self.close_btn = QPushButton("Cancel")
+        self.close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.close_btn)
+
+        frame_layout.addLayout(btn_layout)
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _load_fontset_list(self):
+        self.fontset_list.clear()
+        seen = set()
+        for name, path in self.fontsets:
+            if name not in seen:
+                seen.add(name)
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, path)
+                self.fontset_list.addItem(item)
+
+    def _detect_current_fontset(self):
+        toolsdir = nscde_toolsdir()
+        env = dict(os.environ)
+        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+        env.setdefault("NSCDE_DATADIR", nscde_datadir())
+        env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+
+        try:
+            result = subprocess.run(
+                [os.path.join(toolsdir, "getfont"), "-F", "name"],
+                capture_output=True, text=True, timeout=5, env=env,
+            )
+            current_name = result.stdout.strip().split("\n")[0]
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            current_name = ""
+
+        if not current_name:
+            return
+
+        for i in range(self.fontset_list.count()):
+            item = self.fontset_list.item(i)
+            if item.text() == current_name:
+                self.fontset_list.setCurrentItem(item)
+                break
+
+    def _on_fontset_selected(self, row):
+        if row < 0:
+            return
+        item = self.fontset_list.item(row)
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        self.selected_fontset_path = path
+        self.selected_fontset_fonts = parse_fontset_file(path)
+        self._update_previews()
+
+    def _on_size_group_changed(self, text):
+        size_map = {"Small": "SMALL", "Medium": "MEDIUM", "Large": "LARGE"}
+        self.current_size_group = size_map.get(text, "MEDIUM")
+        self._update_previews()
+
+    def _update_previews(self):
+        for slot_key, preview_label in self.preview_labels:
+            size_key = slot_key.replace("MEDIUM", self.current_size_group)
+            fontset_key = self._slot_to_fontset_key(size_key)
+            xft_str = self.selected_fontset_fonts.get(fontset_key, "")
+
+            if xft_str:
+                qf = xft_to_qfont(xft_str)
+                preview_label.setFont(qf)
+                preview_label.setText(
+                    "Quick Brown Fox Jumps Over Lazy Dog"
+                )
+            else:
+                preview_label.setText("(not available)")
+
+    def _slot_to_fontset_key(self, slot_key):
+        parts = slot_key.split("_")
+        if len(parts) >= 3:
+            spacing = parts[0].lower()
+            weight = parts[1].lower()
+            size = parts[2].lower()
+            return "font.{}.{}.{}".format(spacing, weight, size)
+        return ""
+
+    def _on_save(self):
+        if not self.selected_fontset_path:
+            return
+
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setText("Saving...")
+        QApplication.processEvents()
+
+        try:
+            toolsdir = nscde_toolsdir()
+            backend = os.environ.get("NSCDE_BACKEND", "labwc")
+
+            env = dict(os.environ)
+            env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+            env.setdefault("NSCDE_DATADIR", nscde_datadir())
+            env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+            env.setdefault("NSCDE_BACKEND", backend)
+
+            fontset_name = os.path.splitext(
+                os.path.basename(self.selected_fontset_path)
+            )[0]
+
+            fontset_link_dir = os.path.join(nscde_fvwm_userdir(), "fontsets")
+            fontset_link = os.path.join(
+                fontset_link_dir,
+                "Font-96dpi.fontset",
+            )
+
+            try:
+                os.makedirs(fontset_link_dir, exist_ok=True)
+                if os.path.islink(fontset_link) or os.path.exists(fontset_link):
+                    os.remove(fontset_link)
+                os.symlink(self.selected_fontset_path, fontset_link)
+            except OSError as e:
+                QMessageBox.warning(
+                    self, "Error", "Failed to create fontset symlink: {}".format(e)
+                )
+                return
+
+            cmd = (
+                '. "{shlib}" && '
+                'nscde_style_record_fontset "{fontset}"'
+            ).format(
+                shlib=os.path.join(toolsdir, "style_managers.shlib"),
+                fontset=self.selected_fontset_path,
+            )
+            try:
+                subprocess.run(
+                    ["ksh", "-c", cmd],
+                    capture_output=True,
+                    timeout=10,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                pass
+
+            if backend == "labwc":
+                apply_cmd = (
+                    '. "{shlib}" && nscde_style_backend_apply'
+                ).format(shlib=os.path.join(toolsdir, "style_managers.shlib"))
+                try:
+                    subprocess.run(
+                        ["ksh", "-c", apply_cmd],
+                        capture_output=True,
+                        timeout=30,
+                        env=env,
+                    )
+                except subprocess.TimeoutExpired:
+                    pass
+
+        finally:
+            self.apply_btn.setEnabled(True)
+            self.apply_btn.setText("Save")
+
+
+def main():
+    app = QApplication(sys.argv)
+    mgr = NsCDEFontMgr()
+    mgr.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

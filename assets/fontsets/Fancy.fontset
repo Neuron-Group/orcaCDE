@@ -1,0 +1,24 @@
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+font.variable.normal.small=xft:Comic Neue:Medium:Regular:size=10
+font.variable.normal.medium=xft:Comic Neue:Medium:Regular:size=12
+font.variable.normal.large=xft:Comic Neue:Medium:Regular:size=14
+
+font.variable.bold.small=xft:Comic Neue:Medium:Bold:size=10
+font.variable.bold.medium=xft:Comic Neue:Medium:Bold:size=12
+font.variable.bold.large=xft:Comic Neue:Medium:Bold:size=14
+
+font.variable.italic.small=xft:Comic Neue:Medium:Oblique:size=10
+font.variable.italic.medium=xft:Comic Neue:Medium:Oblique:size=12
+font.variable.italic.large=xft:Comic Neue:Medium:Oblique:size=14
+
+font.monospaced.normal.small=xft:Source Code Pro:Medium:Regular:size=10
+font.monospaced.normal.medium=xft:Source Code Pro:Medium:Regular:size=12
+font.monospaced.normal.large=xft:Source Code Pro:Medium:Regular:size=14
+
+font.monospaced.bold.small=xft:Source Code Pro:Medium:Bold:size=10
+font.monospaced.bold.medium=xft:Source Code Pro:Medium:Bold:size=12
+font.monospaced.bold.large=xft:Source Code Pro:Medium:Bold:size=14

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=NsCDE (Wayland)
+Comment=Not so Common Desktop Environment on labwc
+Exec=nscde_labwc_session
+TryExec=nscde_labwc_session
+Type=Application
+DesktopNames=NsCDE

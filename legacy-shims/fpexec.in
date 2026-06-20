@@ -1,0 +1,61 @@
+#!@KSH@
+
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# Called from f_FrontPanelAction to populate Front Panel Actions
+
+Button="$1"
+MouseBtn="$2"
+
+SysActionFile="$NSCDE_DATADIR/defaults/FrontPanel.actions"
+if [ -r "$FVWM_USERDIR/FrontPanel.actions" ]; then
+   UserActionFile="$FVWM_USERDIR/FrontPanel.actions"
+else
+   UserActionFile="/dev/null"
+fi
+
+ActionLine=$(egrep "^${Button},.*,${MouseBtn},.*,.*" $UserActionFile $SysActionFile | head -1)
+if [ "x${ActionLine}" != "x" ]; then
+   echo $ActionLine | while IFS="," read button icon mousebutton check cmd
+   do
+      if [ "$check" == "NOCHK" ]; then
+         echo "Exec exec $cmd"
+      elif [ "$check" == "FVWM" ]; then
+         # Find the docs if this was mouse button 3
+         if [ "${cmd%% *}" == "f_FrontPanelPropsMenu" ] && [ "$mousebutton" == "M3" ]; then
+            ExamineActionLine=$(egrep "^${Button},.*,M1,.*,.*" $UserActionFile $SysActionFile | head -1)
+            ExamineActionLine="${ExamineActionLine//\"}"
+            if [ "${ExamineActionLine##*,}" != "__APPCMD8__" ]; then
+               if [[ "$ExamineActionLine" =~ f_DisplayURL ]]; then
+                  echo "InfoStoreAdd fp_help_line SPECIAL:NSCDE_DOCS"
+               else
+                  echo "InfoStoreAdd fp_help_line \"${ExamineActionLine##*,}\""
+               fi
+            else
+               if [ "x$NSCDE_HAS_APPMGR" == "x1" ]; then
+                  echo "InfoStoreAdd fp_help_line \"$[infostore.appmgr]\""
+               else
+                  echo "InfoStoreAdd fp_help_line \"$[infostore.xeditor]\""
+               fi
+            fi
+         fi
+         echo "$cmd"
+      elif [ "$check" == "__SPECIAL8__" ]; then
+         if [ "x$NSCDE_HAS_APPMGR" == "x1" ]; then
+            echo "Exec exec $[infostore.appmgr]"
+         else
+            echo "Exec exec $[infostore.xeditor]"
+         fi
+      elif [ "${icon}" == "__APPLET__" ]; then
+         echo "$cmd"
+      else
+         echo "Test (x $check) Exec exec $cmd"
+      fi
+   done
+else
+   echo "Nop"
+fi

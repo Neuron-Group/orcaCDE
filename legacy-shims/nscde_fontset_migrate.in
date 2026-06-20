@@ -1,0 +1,128 @@
+#!@KSH@
+
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# Migrate .fontset files from FVWM InfoStoreAdd format to backend-agnostic
+# key=value format.
+#
+# Old format:  InfoStoreAdd font.variable.normal.small "xft:Family:Medium:Roman:size=10"
+# New format:  font.variable.normal.small=xft:Family:Medium:Roman:size=10
+#
+# Usage:
+#   nscde_fontset_migrate [-n] [-v] [-d DIR] [file ...]
+#
+# Options:
+#   -n   Dry run; show what would be changed without modifying files
+#   -v   Verbose output
+#   -d   Additional directory to scan for .fontset files
+#   -h   Show this help
+#
+# If no files are given, migrates all .fontset files in $NSCDE_DATADIR/fontsets
+# and $FVWM_USERDIR/fontsets.
+
+export LC_ALL=C
+
+DryRun=0
+Verbose=0
+ExtraDir=""
+
+function usage
+{
+   echo "Usage: ${0##*/} [-n] [-v] [-d DIR] [file ...]"
+   echo "  -n  Dry run"
+   echo "  -v  Verbose"
+   echo "  -d  Additional directory to scan"
+   echo "  -h  Help"
+   exit 0
+}
+
+function migrate_file
+{
+   local _file="$1"
+   local _tmp
+   local _changed=0
+
+   if [ ! -r "$_file" ]; then
+      echo "Warning: cannot read $_file" >&2
+      return 1
+   fi
+
+   # Check if already in new format (no InfoStoreAdd lines)
+   if ! grep -q '^InfoStoreAdd ' "$_file" 2>/dev/null; then
+      if (($Verbose)); then
+         echo "Skip (already migrated): $_file"
+      fi
+      return 0
+   fi
+
+   if (($Verbose)); then
+      echo "Migrating: $_file"
+   fi
+
+   if (($DryRun)); then
+      # Show diff-like output without modifying
+      grep '^InfoStoreAdd ' "$_file" | while IFS= read -r line; do
+         local _key _val
+          _key=$(echo "$line" | sed 's/^InfoStoreAdd \([^ ]*\) .*/\1/')
+          _val=$(echo "$line" | sed 's/^InfoStoreAdd [^ ]* *"\(.*\)"/\1/')
+         echo "  old: $line"
+         echo "  new: ${_key}=${_val}"
+      done
+      return 0
+   fi
+
+   _tmp=$(mktemp) || return 1
+
+   while IFS= read -r line; do
+      case "$line" in
+         InfoStoreAdd\ *)
+            local _key _val
+            _key=$(echo "$line" | sed 's/^InfoStoreAdd \([^ ]*\) .*/\1/')
+            _val=$(echo "$line" | sed 's/^InfoStoreAdd [^ ]* *"\(.*\)"/\1/')
+            echo "${_key}=${_val}"
+            _changed=1
+            ;;
+         *)
+            echo "$line"
+            ;;
+      esac
+   done < "$_file" > "$_tmp"
+
+   if (($_changed == 1)); then
+      mv "$_tmp" "$_file"
+      if (($Verbose)); then
+         echo "  Done: $_file"
+      fi
+   else
+      rm -f "$_tmp"
+   fi
+}
+
+while getopts "nvd:h" Option; do
+   case $Option in
+      n) DryRun=1 ;;
+      v) Verbose=1 ;;
+      d) ExtraDir="$OPTARG" ;;
+      h) usage ;;
+   esac
+done
+shift $((OPTIND - 1))
+
+if (($# > 0)); then
+   for f in "$@"; do
+      migrate_file "$f"
+   done
+else
+   # Scan system and user fontset directories
+   for dir in "${NSCDE_DATADIR:-/usr/share/NsCDE}/fontsets" "${FVWM_USERDIR:-$HOME/.NsCDE}/fontsets" "$ExtraDir"; do
+      if [ -d "$dir" ]; then
+         for f in "$dir"/*.fontset; do
+            [ -f "$f" ] && migrate_file "$f"
+         done
+      fi
+   done
+fi

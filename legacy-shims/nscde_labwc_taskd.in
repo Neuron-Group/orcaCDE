@@ -1,0 +1,101 @@
+#!@KSH@
+
+#
+# NsCDE task list daemon for labwc backend.
+#
+# Provides window state tracking for task list and window switcher UIs.
+# Reads window state from sessiond, publishes task state for
+# shell UI consumption, and handles window focus commands.
+#
+# This is a stage-one implementation that coordinates with
+# nscde_sessiond via the shared state model and command FIFO.
+#
+# Window registration is expected to come from an external source
+# (e.g., a foreign-toplevel protocol listener or manual FIFO commands).
+#
+# Uses inotifywait for event-driven file monitoring when available,
+# falling back to polling with sleep if inotifywait is not found.
+#
+
+if [ -z "$HOME" ]; then
+   echo "Error: HOME not set." >&2
+   exit 2
+fi
+
+export NSCDE_BACKEND=${NSCDE_BACKEND:-labwc}
+export NSCDE_ROOT=${NSCDE_ROOT:-@prefix@}
+
+# Source the shared backend library
+. "@NSCDE_TOOLSDIR@/nscde_backend.shlib"
+
+# Initialize backend environment
+nscde_backend_init || exit 2
+
+# Ensure state directory exists
+nscde_state_ensure_dir
+
+# PID file for this daemon
+NSCDE_TASKD_PID_FILE="${NSCDE_STATE_DIR}/taskd.pid"
+
+cleanup() {
+   rm -f "$NSCDE_TASKD_PID_FILE"
+   exit 0
+}
+
+trap cleanup INT TERM EXIT
+
+echo $$ > "$NSCDE_TASKD_PID_FILE"
+
+# Publish initial task state using library function
+nscde_taskd_publish
+
+# Watch for window state changes and update task state
+# This loop monitors the windows.env file for changes
+# and republishes task state accordingly.
+_last_window_count=""
+_last_focused=""
+
+# Detect inotifywait availability for event-driven monitoring
+_INOTIFYWAIT=""
+if command -v inotifywait >/dev/null 2>&1; then
+   _INOTIFYWAIT="$(command -v inotifywait)"
+fi
+
+# Determine state directory to watch (parent of windows.env)
+_watch_dir="${NSCDE_STATE_DIR}"
+
+taskd_check_state() {
+   if [ -f "$NSCDE_WINDOWS_FILE" ]; then
+      _new_count=$(nscde_state_read "$NSCDE_WINDOWS_FILE" "NSCDE_WINDOW_COUNT" 2>/dev/null)
+      _new_focused=$(nscde_state_read "$NSCDE_WINDOWS_FILE" "NSCDE_FOCUSED_WINDOW" 2>/dev/null)
+
+      # Update if changed
+      if [ "$_new_count" != "$_last_window_count" ] || [ "$_new_focused" != "$_last_focused" ]; then
+         _last_window_count="$_new_count"
+         _last_focused="$_new_focused"
+         nscde_taskd_publish
+      fi
+   fi
+}
+
+if [ -n "$_INOTIFYWAIT" ]; then
+   # Event-driven monitoring via inotifywait
+   while true
+   do
+      taskd_check_state
+
+      # Wait for file modifications in the state directory.
+      # -m: monitor, -q: quiet, -e: event types, -t: timeout (seconds)
+      # Use a timeout so we still periodically re-check even if
+      # an event is missed or the file is replaced atomically.
+      "$_INOTIFYWAIT" -q -e close_write -e moved_to -e create \
+         -t 30 -- "$_watch_dir" >/dev/null 2>&1
+   done
+else
+   # Fallback: polling with sleep
+   while true
+   do
+      taskd_check_state
+      sleep 1
+   done
+fi

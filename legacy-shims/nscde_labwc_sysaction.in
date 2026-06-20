@@ -1,0 +1,444 @@
+#!@PYTHON@
+
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+ACTION_LOGOUT = 0
+ACTION_RESTART = 1
+ACTION_FAILSAFE = 2
+ACTION_SHUTDOWN = 3
+ACTION_REBOOT = 4
+ACTION_SUSPEND = 5
+ACTION_HYBRID_SUSPEND = 6
+ACTION_HIBERNATE = 7
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def state_dir():
+    state = os.environ.get("NSCDE_STATE_DIR", "")
+    if state:
+        return state
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1")
+
+
+def lastval_path():
+    return os.path.join(state_dir(), ".SysActionDialog.lastval")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_toolsdir():
+    toolsdir = os.environ.get("NSCDE_TOOLSDIR", "")
+    if toolsdir:
+        return toolsdir
+    home = os.path.expanduser("~")
+    user_dir = os.path.join(home, ".NsCDE", "nscde_tools")
+    if os.path.isdir(user_dir):
+        return user_dir
+    return "/usr/share/NsCDE/nscde_tools"
+
+
+def session_fifo_path():
+    fifo = os.environ.get("NSCDE_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    return os.path.join(state_dir(), "sessiond.fifo")
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDESysAction {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QComboBox {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                padding: 4px 8px;
+                background-color: {bg};
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QComboBox::drop-down {{
+                border: none;
+            }}
+            QComboBox QAbstractItemView {{
+                color: {sfg};
+                background-color: {bg};
+                selection-background-color: {acc};
+                selection-color: #ffffff;
+            }}
+            QCheckBox {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+def detect_power_support():
+    """Detect which power management actions are available."""
+    support = {
+        "suspend": False,
+        "hybrid-suspend": False,
+        "hibernate": False,
+    }
+    toolsdir = nscde_toolsdir()
+    acpimgr = os.path.join(toolsdir, "acpimgr")
+    if not os.path.exists(acpimgr):
+        return support
+
+    for action in support:
+        try:
+            result = subprocess.run(
+                [acpimgr, action, "systemd"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=2,
+            )
+            if result.returncode == 0:
+                support[action] = True
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+    return support
+
+
+def get_action_items(power_support):
+    """Build the list of action items with availability status."""
+    items = [
+        (ACTION_LOGOUT, "X Window System: Logout", True),
+        (ACTION_RESTART, "X Window System: Window Manager Restart", True),
+        (ACTION_FAILSAFE, "X Window System: Failsafe (terminal)", True),
+        (ACTION_SHUTDOWN, "Operating System: Shutdown", True),
+        (ACTION_REBOOT, "Operating System: Reboot", True),
+        (ACTION_SUSPEND, "Operating System: Suspend/Sleep", power_support.get("suspend", False)),
+        (ACTION_HYBRID_SUSPEND, "Operating System: Hybrid Suspend", power_support.get("hybrid-suspend", False)),
+        (ACTION_HIBERNATE, "Operating System: Hibernate", power_support.get("hibernate", False)),
+    ]
+    return items
+
+
+def read_last_action():
+    """Read the last remembered action index."""
+    try:
+        with open(lastval_path(), "r") as f:
+            val = f.read().strip()
+            if val.isdigit():
+                idx = int(val)
+                if 0 <= idx <= 7:
+                    return idx
+    except (IOError, ValueError):
+        pass
+    return ACTION_LOGOUT
+
+
+def save_last_action(idx):
+    """Save the last action index."""
+    try:
+        os.makedirs(os.path.dirname(lastval_path()), exist_ok=True)
+        with open(lastval_path(), "w") as f:
+            f.write(str(idx) + "\n")
+    except IOError:
+        pass
+
+
+class NsCDESysAction(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("NsCDE: System Action")
+        self.setObjectName("NsCDESysAction")
+        self.setMinimumWidth(460)
+
+        self.power_support = detect_power_support()
+        self.action_items = get_action_items(self.power_support)
+        self.current_palette = list(DEFAULT_PALETTE)
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._restore_last_action()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(6)
+
+        title = QLabel("User Confirmation:")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignLeft)
+        frame_layout.addWidget(title)
+
+        subtitle = QLabel("X Window System or Operating System Action")
+        subtitle.setAlignment(Qt.AlignLeft)
+        frame_layout.addWidget(subtitle)
+
+        self.action_combo = QComboBox()
+        for action_idx, label, available in self.action_items:
+            if available:
+                self.action_combo.addItem(label, action_idx)
+            else:
+                self.action_combo.addItem(label + "  (not supported)", action_idx)
+                model = self.action_combo.model()
+                item = model.item(model.rowCount() - 1)
+                item.setEnabled(False)
+        frame_layout.addWidget(self.action_combo)
+
+        self.remember_cb = QCheckBox("Remember Last Action")
+        self.remember_cb.setChecked(True)
+        frame_layout.addWidget(self.remember_cb)
+
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        frame_layout.addWidget(separator)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        confirm_btn = QPushButton("Confirm")
+        confirm_btn.clicked.connect(self._on_confirm)
+        btn_row.addWidget(confirm_btn)
+
+        dismiss_btn = QPushButton("Dismiss")
+        dismiss_btn.clicked.connect(self.close)
+        btn_row.addWidget(dismiss_btn)
+
+        help_btn = QPushButton("Help")
+        help_btn.clicked.connect(self._on_help)
+        btn_row.addWidget(help_btn)
+
+        frame_layout.addLayout(btn_row)
+
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _restore_last_action(self):
+        last = read_last_action()
+        for i in range(self.action_combo.count()):
+            if self.action_combo.itemData(i) == last:
+                self.action_combo.setCurrentIndex(i)
+                break
+
+    def _on_confirm(self):
+        idx = self.action_combo.currentIndex()
+        action = self.action_combo.itemData(idx)
+        available = self.action_items[action][2] if action < len(self.action_items) else False
+
+        if not available:
+            return
+
+        if self.remember_cb.isChecked():
+            save_last_action(action)
+        else:
+            try:
+                os.remove(lastval_path())
+            except (IOError, OSError):
+                pass
+
+        if action == ACTION_LOGOUT:
+            self._do_logout()
+        elif action == ACTION_RESTART:
+            self._do_restart()
+        elif action == ACTION_FAILSAFE:
+            self._do_failsafe()
+        elif action == ACTION_SHUTDOWN:
+            self._do_power("poweroff")
+        elif action == ACTION_REBOOT:
+            self._do_power("reboot")
+        elif action == ACTION_SUSPEND:
+            self._do_power("suspend")
+        elif action == ACTION_HYBRID_SUSPEND:
+            self._do_power("hybrid-suspend")
+        elif action == ACTION_HIBERNATE:
+            self._do_power("hibernate")
+
+    def _do_logout(self):
+        try:
+            subprocess.Popen(["pkill", "-TERM", "labwc"])
+        except (FileNotFoundError, OSError):
+            pass
+        QApplication.quit()
+
+    def _do_restart(self):
+        fifo = session_fifo_path()
+        try:
+            with open(fifo, "w") as f:
+                f.write("reload\n")
+        except (IOError, OSError):
+            try:
+                subprocess.Popen(["labwc", "--reconfigure"])
+            except (FileNotFoundError, OSError):
+                pass
+        QApplication.quit()
+
+    def _do_failsafe(self):
+        for cmd in ["weston-terminal", "xterm", "foot", "alacritty"]:
+            try:
+                subprocess.Popen([cmd])
+                break
+            except (FileNotFoundError, OSError):
+                continue
+        QApplication.quit()
+
+    def _do_power(self, action):
+        toolsdir = nscde_toolsdir()
+        acpimgr = os.path.join(toolsdir, "acpimgr")
+        if not os.path.exists(acpimgr):
+            return
+        try:
+            subprocess.Popen([acpimgr, action])
+        except (FileNotFoundError, OSError):
+            try:
+                subprocess.Popen(["sudo", "-n", acpimgr, action])
+            except (FileNotFoundError, OSError):
+                pass
+        QApplication.quit()
+
+    def _on_help(self):
+        toolsdir = nscde_toolsdir()
+        help_url = "file://{}/../docs/html/basics_logging_out.html".format(toolsdir)
+        try:
+            subprocess.Popen(["xdg-open", help_url])
+        except (FileNotFoundError, OSError):
+            pass
+
+
+def main():
+    app = QApplication(sys.argv)
+    dialog = NsCDESysAction()
+    dialog.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,198 @@
+#!@KSH@
+
+#
+# NsCDE Wayland backdrop helper for labwc.
+#
+# Generates palette-aware background images and applies them via swaybg.
+# Supports per-output targeting for mixed-output setups: when wlr-randr
+# is available and reports multiple outputs, each output gets a separate
+# swaybg instance with a resolution-appropriate image. Falls back to a
+# single swaybg on all outputs when output enumeration is unavailable.
+#
+
+if [ -z "$HOME" ]; then
+   echo "Error: HOME not set." >&2
+   exit 2
+fi
+
+export NSCDE_BACKEND=${NSCDE_BACKEND:-labwc}
+export NSCDE_ROOT=${NSCDE_ROOT:-@prefix@}
+
+. "@NSCDE_TOOLSDIR@/nscde_backend.shlib"
+
+nscde_backend_init || exit 2
+
+BG_DIR="${NSCDE_STATE_DIR}/backdrops"
+mkdir -p "$BG_DIR"
+
+# Locate swaybg
+SWAYBG_BIN=$(whence -p swaybg)
+if [ -z "$SWAYBG_BIN" ]; then
+   echo "Warning: swaybg not found in PATH, backdrop helper cannot start." >&2
+   exit 0
+fi
+
+# Locate ImageMagick for image generation
+CONVERT_BIN=$(whence -p magick)
+if [ -z "$CONVERT_BIN" ]; then
+   CONVERT_BIN=$(whence -p convert)
+fi
+
+if [ -z "$CONVERT_BIN" ]; then
+   echo "Warning: ImageMagick not available, cannot generate backdrop images." >&2
+   exit 1
+fi
+
+# Determine background color from palette
+# Uses palette index 1 (Background) for the root window color.
+_bg_color="#506070"
+
+if [ -r "$NSCDE_PALETTE_FILE" ]; then
+   _palette_bg=$(nscde_palette_color 1 "$NSCDE_PALETTE_FILE")
+   if [ -n "$_palette_bg" ]; then
+      _bg_color="$_palette_bg"
+   fi
+fi
+
+# Determine the base backdrop image/mode from environment.
+# NSCDE_BACKDROP_IMAGE and NSCDE_BACKDROP_MODE are set by
+# nscde_style_backend_apply before launching this helper.
+_bg_mode="fill"
+case "${NSCDE_BACKDROP_MODE:-}" in
+   tiled)
+      _bg_mode="tile"
+      ;;
+   photo)
+      _bg_mode="fill"
+      ;;
+esac
+
+if [ -n "$NSCDE_BACKDROP_IMAGE" ] && [ -r "$NSCDE_BACKDROP_IMAGE" ]; then
+   _bg_source_image="$NSCDE_BACKDROP_IMAGE"
+else
+   _bg_source_image=""
+fi
+
+# Kill any existing swaybg instances before starting new ones.
+# Do not add an unconditional sleep here: this helper is on the visible
+# startup path and should paint something as quickly as possible.
+pkill -x swaybg 2>/dev/null
+
+# _generate_backdrop OUTPUT_NAME WIDTH HEIGHT
+#
+# Generates a backdrop image at the given resolution and prints its path.
+# For tiled backdrops, the source image is used directly (swaybg tiles it).
+# For solid/generated backdrops, generates at the output's native resolution.
+_generate_backdrop()
+{
+   _gb_output=$1
+   _gb_width=$2
+   _gb_height=$3
+
+   if [ -n "$_bg_source_image" ]; then
+      # Source image exists; swaybg will handle scaling/tiling per output.
+      printf '%s' "$_bg_source_image"
+      return
+   fi
+
+   # Generate a solid-color image at the output's native resolution.
+   _gb_out="${BG_DIR}/backdrop-${_gb_output}-${_gb_width}x${_gb_height}.png"
+   "$CONVERT_BIN" -size "${_gb_width}x${_gb_height}" "xc:${_bg_color}" \
+      "$_gb_out" 2>/dev/null
+   if [ $? -ne 0 ]; then
+      echo "Warning: failed to generate backdrop for output ${_gb_output}." >&2
+      return 1
+   fi
+   printf '%s' "$_gb_out"
+}
+
+# _launch_swaybg OUTPUT IMAGE MODE
+#
+# Launches a swaybg instance targeting a specific output.
+_launch_swaybg()
+{
+   _ls_output=$1
+   _ls_image=$2
+   _ls_mode=$3
+   "$SWAYBG_BIN" -o "$_ls_output" -i "$_ls_image" -m "$_ls_mode" &
+}
+
+# Start a single global backdrop immediately so the session does not sit on a
+# black screen while output enumeration and helper startup settle.
+if [ -n "$_bg_source_image" ]; then
+   _fast_bg_image="$_bg_source_image"
+else
+   _fast_bg_image="${BG_DIR}/backdrop-solid.png"
+   "$CONVERT_BIN" -size 1920x1080 "xc:${_bg_color}" "$_fast_bg_image" 2>/dev/null
+fi
+
+_fast_swaybg_pid=""
+if [ -n "$_fast_bg_image" ] && [ -r "$_fast_bg_image" ]; then
+   "$SWAYBG_BIN" -i "$_fast_bg_image" -m "$_bg_mode" &
+   _fast_swaybg_pid=$!
+   nscde_state_ensure_dir
+   nscde_backdrop_publish "$_fast_bg_image" "$_bg_color"
+fi
+
+# Try per-output mode: enumerate outputs via wlr-randr.
+_output_count=0
+_outputs=$(nscde_output_list 2>/dev/null)
+
+if [ -n "$_outputs" ]; then
+   if [ -n "$_fast_swaybg_pid" ]; then
+      kill "$_fast_swaybg_pid" 2>/dev/null
+   fi
+
+   # Per-output path: generate and apply per-output backdrops.
+   nscde_state_ensure_dir
+   # Clear stale per-output state
+   : > "${NSCDE_BACKDROP_OUTPUT_FILE}.tmp" 2>/dev/null
+
+   printf '%s\n' "$_outputs" | while IFS= read -r _out_name
+   do
+      [ -z "$_out_name" ] && continue
+
+      _out_geo=$(nscde_output_geometry "$_out_name" 2>/dev/null)
+      if [ -n "$_out_geo" ]; then
+         _out_width=${_out_geo%%x*}
+         _out_height=${_out_geo##*x}
+      else
+         _out_width=1920
+         _out_height=1080
+      fi
+
+      _out_image=$(_generate_backdrop "$_out_name" "$_out_width" "$_out_height")
+      if [ -z "$_out_image" ]; then
+         continue
+      fi
+
+      _launch_swaybg "$_out_name" "$_out_image" "$_bg_mode"
+
+      # Publish per-output backdrop state
+      nscde_backdrop_publish_output "$_out_name" "$_out_image" "$_bg_mode" "$_bg_color"
+
+      _output_count=$((_output_count + 1))
+   done
+
+   # Read back the count (the subshell loop cannot update parent variable,
+   # so re-count from the state file).
+   _actual_count=$(grep -c '^NSCDE_BACKDROP_OUTPUT_.*_IMAGE=' \
+      "$NSCDE_BACKDROP_OUTPUT_FILE" 2>/dev/null || echo "0")
+   nscde_backdrop_publish_outputs_count "$_actual_count"
+
+   # Also publish legacy single-entry state using the first output's image
+   _first_output=$(printf '%s\n' "$_outputs" | head -1)
+   if [ -n "$_first_output" ]; then
+      _first_image=$(nscde_backdrop_read_output "$_first_output" "IMAGE")
+      if [ -n "$_first_image" ]; then
+         nscde_backdrop_publish "$_first_image" "$_bg_color"
+      fi
+   fi
+else
+   # Fallback: single swaybg for all outputs (original behavior).
+   if [ -n "$_fast_swaybg_pid" ]; then
+      wait "$_fast_swaybg_pid"
+      exit 0
+   fi
+   exit 1
+fi

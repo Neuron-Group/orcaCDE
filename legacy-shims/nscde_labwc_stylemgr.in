@@ -1,0 +1,252 @@
+#!@PYTHON@
+
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import (
+    QApplication,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_toolsdir():
+    toolsdir = os.environ.get("NSCDE_TOOLSDIR", "")
+    if toolsdir:
+        return toolsdir
+    home = os.path.expanduser("~")
+    user_dir = os.path.join(home, ".NsCDE", "nscde_tools")
+    if os.path.isdir(user_dir):
+        return user_dir
+    return "/usr/share/NsCDE/nscde_tools"
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEStyleMgr {{
+                background-color: {sbg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 70px;
+                min-height: 60px;
+                padding: 4px 8px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+MANAGER_BUTTONS = [
+    ("Color", "color", True),
+    ("Font", "font", True),
+    ("Backdrop", "backdrop", True),
+    ("Keyboard", "keyboard", False),
+    ("Mouse", "mouse", False),
+    ("Beep", "beep", False),
+    ("Screen", "screen", False),
+    ("Window", "window", True),
+    ("Desks", "desks", True),
+    ("Power", "power", False),
+    ("Startup", "startup", False),
+]
+
+
+class NsCDEStyleMgr(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Style Manager")
+        self.setObjectName("NsCDEStyleMgr")
+        self.setMinimumWidth(790)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self._build_ui()
+        self._apply_stylesheet()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(8)
+
+        title = QLabel("NsCDE Style Manager")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+
+        self.buttons = {}
+        for label, key, implemented in MANAGER_BUTTONS:
+            btn = QPushButton(label)
+            btn.setToolTip("{} Style Manager".format(label))
+            if implemented:
+                btn.clicked.connect(lambda checked, k=key: self._launch_manager(k))
+            else:
+                btn.setEnabled(False)
+            self.buttons[key] = btn
+            btn_row.addWidget(btn)
+
+        frame_layout.addLayout(btn_row)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(100)
+        close_btn.clicked.connect(self.close)
+        close_row.addWidget(close_btn)
+        frame_layout.addLayout(close_row)
+
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _launch_manager(self, key):
+        toolsdir = nscde_toolsdir()
+        env = dict(os.environ)
+        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+
+        manager_map = {
+            "color": "nscde_labwc_colormgr",
+            "font": "nscde_labwc_fontmgr",
+            "backdrop": "nscde_labwc_backdropmgr",
+            "window": "nscde_labwc_windowmgr",
+            "desks": "nscde_labwc_wsm",
+        }
+
+        manager_script = manager_map.get(key)
+        if manager_script:
+            script_path = os.path.join(toolsdir, manager_script)
+            if os.path.exists(script_path):
+                subprocess.Popen([script_path], env=env)
+                return
+
+        launcher = os.path.join(toolsdir, "nscde_stylemgr")
+        if os.path.exists(launcher):
+            subprocess.Popen([launcher, key], env=env)
+
+
+def main():
+    app = QApplication(sys.argv)
+    mgr = NsCDEStyleMgr()
+    mgr.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,908 @@
+#
+# NsCDE style state management library.
+#
+# Provides normalized state storage for style managers, decoupling
+# them from backend-specific configuration formats.
+#
+# This file is a part of NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# State file for style settings
+NSCDE_STYLE_STATE_FILE="${NSCDE_STATE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/nscde-stage1}/style.env"
+
+# Ensure style state directory exists
+function nscde_style_state_ensure
+{
+	local _dir
+	_dir=$(dirname "$NSCDE_STYLE_STATE_FILE")
+	if [ ! -d "$_dir" ]; then
+		mkdir -p "$_dir" || return 1
+	fi
+	return 0
+}
+
+# Write a style state value
+# Usage: nscde_style_set KEY VALUE
+function nscde_style_set
+{
+	local _key="$1"
+	local _value="$2"
+
+	nscde_style_state_ensure || return 1
+
+	# Use nscde_state_write from nscde_backend.shlib
+	if type nscde_state_write >/dev/null 2>&1; then
+		nscde_state_write "$NSCDE_STYLE_STATE_FILE" "$_key" "$_value"
+	else
+		# Fallback: direct file manipulation
+		if grep -q "^${_key}=" "$NSCDE_STYLE_STATE_FILE" 2>/dev/null; then
+			sed -i "s|^${_key}=.*|${_key}=${_value}|" "$NSCDE_STYLE_STATE_FILE"
+		else
+			echo "${_key}=${_value}" >> "$NSCDE_STYLE_STATE_FILE"
+		fi
+	fi
+}
+
+# Read a style state value
+# Usage: nscde_style_get KEY
+function nscde_style_get
+{
+	local _key="$1"
+
+	if [ ! -f "$NSCDE_STYLE_STATE_FILE" ]; then
+		return 1
+	fi
+
+	# Use nscde_state_read from nscde_backend.shlib if available
+	if type nscde_state_read >/dev/null 2>&1; then
+		nscde_state_read "$NSCDE_STYLE_STATE_FILE" "$_key"
+	else
+		# Fallback: direct grep
+		grep "^${_key}=" "$NSCDE_STYLE_STATE_FILE" 2>/dev/null | cut -d= -f2-
+	fi
+}
+
+# Remove a style state key
+# Usage: nscde_style_unset KEY
+function nscde_style_unset
+{
+	local _key="$1"
+
+	if [ ! -f "$NSCDE_STYLE_STATE_FILE" ]; then
+		return 0
+	fi
+
+	sed -i "/^${_key}=/d" "$NSCDE_STYLE_STATE_FILE"
+}
+
+# ============================================================
+# Color/Palette State Functions
+# ============================================================
+
+# Set the active palette
+# Usage: nscde_style_set_palette PALETTE_PATH
+function nscde_style_set_palette
+{
+	local _palette_path="$1"
+	local _palette_name
+
+	# Extract name from path
+	_palette_name=$(basename "$_palette_path" .dp)
+
+	nscde_style_set "NSCDE_PALETTE_PATH" "$_palette_path"
+	nscde_style_set "NSCDE_PALETTE_NAME" "$_palette_name"
+}
+
+# Get the active palette path
+function nscde_style_get_palette_path
+{
+	nscde_style_get "NSCDE_PALETTE_PATH"
+}
+
+# Get the active palette name
+function nscde_style_get_palette_name
+{
+	nscde_style_get "NSCDE_PALETTE_NAME"
+}
+
+# Set color mode (4 or 8 colors)
+# Usage: nscde_style_set_color_mode MODE
+function nscde_style_set_color_mode
+{
+	local _mode="$1"
+	nscde_style_set "NSCDE_COLOR_MODE" "$_mode"
+}
+
+# Get color mode
+function nscde_style_get_color_mode
+{
+	local _mode
+	_mode=$(nscde_style_get "NSCDE_COLOR_MODE")
+	echo "${_mode:-8}"
+}
+
+# Set Front Panel variant (5 or 8 color)
+# Usage: nscde_style_set_fp_variant VARIANT
+function nscde_style_set_fp_variant
+{
+	local _variant="$1"
+	nscde_style_set "NSCDE_FP_VARIANT" "$_variant"
+}
+
+# Get Front Panel variant
+function nscde_style_get_fp_variant
+{
+	local _variant
+	_variant=$(nscde_style_get "NSCDE_FP_VARIANT")
+	echo "${_variant:-8}"
+}
+
+# ============================================================
+# Font State Functions
+# ============================================================
+
+# Set a font slot
+# Usage: nscde_style_set_font SLOT FONT_SPEC
+# SLOT format: variable.normal.small, monospaced.bold.large, etc.
+function nscde_style_set_font
+{
+	local _slot="$1"
+	local _font_spec="$2"
+	nscde_style_set "NSCDE_FONT_${_slot}" "$_font_spec"
+}
+
+# Get a font slot
+# Usage: nscde_style_get_font SLOT
+function nscde_style_get_font
+{
+	local _slot="$1"
+	nscde_style_get "NSCDE_FONT_${_slot}"
+}
+
+# Set the active fontset name
+# Usage: nscde_style_set_fontset_name NAME
+function nscde_style_set_fontset_name
+{
+	local _name="$1"
+	nscde_style_set "NSCDE_FONTSET_NAME" "$_name"
+}
+
+# Get the active fontset name
+function nscde_style_get_fontset_name
+{
+	nscde_style_get "NSCDE_FONTSET_NAME"
+}
+
+# Set font DPI
+# Usage: nscde_style_set_font_dpi DPI
+function nscde_style_set_font_dpi
+{
+	local _dpi="$1"
+	nscde_style_set "NSCDE_FONT_DPI" "$_dpi"
+}
+
+# Get font DPI
+function nscde_style_get_font_dpi
+{
+	local _dpi
+	_dpi=$(nscde_style_get "NSCDE_FONT_DPI")
+	echo "${_dpi:-96}"
+}
+
+# ============================================================
+# Backdrop State Functions
+# ============================================================
+
+# Set backdrop for a desk
+# Usage: nscde_style_set_backdrop DESK MODE IMAGE
+# MODE: tiled, aspect, photo
+function nscde_style_set_backdrop
+{
+	local _desk="$1"
+	local _mode="$2"
+	local _image="$3"
+	nscde_style_set "NSCDE_BACKDROP_DESK_${_desk}_MODE" "$_mode"
+	nscde_style_set "NSCDE_BACKDROP_DESK_${_desk}_IMAGE" "$_image"
+}
+
+# Get backdrop mode for a desk
+# Usage: nscde_style_get_backdrop_mode DESK
+function nscde_style_get_backdrop_mode
+{
+	local _desk="$1"
+	nscde_style_get "NSCDE_BACKDROP_DESK_${_desk}_MODE"
+}
+
+# Get backdrop image for a desk
+# Usage: nscde_style_get_backdrop_image DESK
+function nscde_style_get_backdrop_image
+{
+	local _desk="$1"
+	nscde_style_get "NSCDE_BACKDROP_DESK_${_desk}_IMAGE"
+}
+
+# ============================================================
+# Window Behavior State Functions
+# ============================================================
+
+# Set focus policy
+# Usage: nscde_style_set_focus_policy POLICY
+# POLICY: MouseFocus, SloppyFocus, ClickToFocus
+function nscde_style_set_focus_policy
+{
+	local _policy="$1"
+	nscde_style_set "NSCDE_FOCUS_POLICY" "$_policy"
+}
+
+# Get focus policy
+function nscde_style_get_focus_policy
+{
+	local _policy
+	_policy=$(nscde_style_get "NSCDE_FOCUS_POLICY")
+	echo "${_policy:-MouseFocus}"
+}
+
+# Set auto-raise
+# Usage: nscde_style_set_auto_raise ENABLED
+function nscde_style_set_auto_raise
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_AUTO_RAISE" "$_enabled"
+}
+
+# Get auto-raise
+function nscde_style_get_auto_raise
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_AUTO_RAISE")
+	echo "${_enabled:-0}"
+}
+
+# Set raise delay (milliseconds)
+# Usage: nscde_style_set_raise_delay MS
+function nscde_style_set_raise_delay
+{
+	local _ms="$1"
+	nscde_style_set "NSCDE_RAISE_DELAY" "$_ms"
+}
+
+# Get raise delay
+function nscde_style_get_raise_delay
+{
+	local _ms
+	_ms=$(nscde_style_get "NSCDE_RAISE_DELAY")
+	echo "${_ms:-0}"
+}
+
+# Set opaque move
+# Usage: nscde_style_set_opaque_move ENABLED
+function nscde_style_set_opaque_move
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_OPAQUE_MOVE" "$_enabled"
+}
+
+# Get opaque move
+function nscde_style_get_opaque_move
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_OPAQUE_MOVE")
+	echo "${_enabled:-100}"
+}
+
+# Set move threshold
+# Usage: nscde_style_set_move_threshold PIXELS
+function nscde_style_set_move_threshold
+{
+	local _pixels="$1"
+	nscde_style_set "NSCDE_MOVE_THRESHOLD" "$_pixels"
+}
+
+# Get move threshold
+function nscde_style_get_move_threshold
+{
+	local _pixels
+	_pixels=$(nscde_style_get "NSCDE_MOVE_THRESHOLD")
+	echo "${_pixels:-0}"
+}
+
+# Set raise transient policy
+# Usage: nscde_style_set_raise_transient ENABLED
+function nscde_style_set_raise_transient
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_RAISE_TRANSIENT" "$_enabled"
+}
+
+# Get raise transient policy
+function nscde_style_get_raise_transient
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_RAISE_TRANSIENT")
+	echo "${_enabled:-1}"
+}
+
+# Set lower transient policy
+# Usage: nscde_style_set_lower_transient ENABLED
+function nscde_style_set_lower_transient
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_LOWER_TRANSIENT" "$_enabled"
+}
+
+# Get lower transient policy
+function nscde_style_get_lower_transient
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_LOWER_TRANSIENT")
+	echo "${_enabled:-1}"
+}
+
+# Set stack transient parent policy
+# Usage: nscde_style_set_stack_transient ENABLED
+function nscde_style_set_stack_transient
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_STACK_TRANSIENT" "$_enabled"
+}
+
+# Get stack transient parent policy
+function nscde_style_get_stack_transient
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_STACK_TRANSIENT")
+	echo "${_enabled:-1}"
+}
+
+# ============================================================
+# Icon State Functions
+# ============================================================
+
+# Set icon placement mode
+# Usage: nscde_style_set_icon_placement MODE
+# MODE: 0 (workspace), 1 (iconbox)
+function nscde_style_set_icon_placement
+{
+	local _mode="$1"
+	nscde_style_set "NSCDE_ICON_PLACEMENT" "$_mode"
+}
+
+# Get icon placement mode
+function nscde_style_get_icon_placement
+{
+	local _mode
+	_mode=$(nscde_style_get "NSCDE_ICON_PLACEMENT")
+	echo "${_mode:-0}"
+}
+
+# Set icon fill direction
+# Usage: nscde_style_set_icon_fill DIRECTION
+# DIRECTION: bottom.left, top.left, bottom.right, top.right
+function nscde_style_set_icon_fill
+{
+	local _direction="$1"
+	nscde_style_set "NSCDE_ICON_FILL" "$_direction"
+}
+
+# Get icon fill direction
+function nscde_style_get_icon_fill
+{
+	local _direction
+	_direction=$(nscde_style_get "NSCDE_ICON_FILL")
+	echo "${_direction:-bottom.left}"
+}
+
+# Set icon size
+# Usage: nscde_style_set_icon_size DEF_W DEF_H MAX_W MAX_H
+function nscde_style_set_icon_size
+{
+	local _size="$1,$2,$3,$4"
+	nscde_style_set "NSCDE_ICON_SIZE" "$_size"
+}
+
+# Get icon size (returns comma-separated values)
+function nscde_style_get_icon_size
+{
+	local _size
+	_size=$(nscde_style_get "NSCDE_ICON_SIZE")
+	echo "${_size:-48,48,128,128}"
+}
+
+# ============================================================
+# Page Edge State Functions
+# ============================================================
+
+# Set edge thickness
+# Usage: nscde_style_set_edge_thickness PIXELS
+function nscde_style_set_edge_thickness
+{
+	local _pixels="$1"
+	nscde_style_set "NSCDE_EDGE_THICKNESS" "$_pixels"
+}
+
+# Get edge thickness
+function nscde_style_get_edge_thickness
+{
+	local _pixels
+	_pixels=$(nscde_style_get "NSCDE_EDGE_THICKNESS")
+	echo "${_pixels:-0}"
+}
+
+# Set edge resistance
+# Usage: nscde_style_set_edge_resistance PIXELS
+function nscde_style_set_edge_resistance
+{
+	local _pixels="$1"
+	nscde_style_set "NSCDE_EDGE_RESISTANCE" "$_pixels"
+}
+
+# Get edge resistance
+function nscde_style_get_edge_resistance
+{
+	local _pixels
+	_pixels=$(nscde_style_get "NSCDE_EDGE_RESISTANCE")
+	echo "${_pixels:-0}"
+}
+
+# Set edge move resistance
+# Usage: nscde_style_set_edge_move_resistance PIXELS
+function nscde_style_set_edge_move_resistance
+{
+	local _pixels="$1"
+	nscde_style_set "NSCDE_EDGE_MOVE_RESISTANCE" "$_pixels"
+}
+
+# Get edge move resistance
+function nscde_style_get_edge_move_resistance
+{
+	local _pixels
+	_pixels=$(nscde_style_get "NSCDE_EDGE_MOVE_RESISTANCE")
+	echo "${_pixels:-0}"
+}
+
+# Set edge move delay
+# Usage: nscde_style_set_edge_move_delay MS
+function nscde_style_set_edge_move_delay
+{
+	local _ms="$1"
+	nscde_style_set "NSCDE_EDGE_MOVE_DELAY" "$_ms"
+}
+
+# Get edge move delay
+function nscde_style_get_edge_move_delay
+{
+	local _ms
+	_ms=$(nscde_style_get "NSCDE_EDGE_MOVE_DELAY")
+	echo "${_ms:-0}"
+}
+
+# Set raise FP on page change
+# Usage: nscde_style_set_raise_fp_on_page ENABLED
+function nscde_style_set_raise_fp_on_page
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_RAISE_FP_ON_PAGE" "$_enabled"
+}
+
+# Get raise FP on page change
+function nscde_style_get_raise_fp_on_page
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_RAISE_FP_ON_PAGE")
+	echo "${_enabled:-0}"
+}
+
+# Set pager preview
+# Usage: nscde_style_set_pager_preview ENABLED
+function nscde_style_set_pager_preview
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_PAGER_PREVIEW" "$_enabled"
+}
+
+# Get pager preview
+function nscde_style_get_pager_preview
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_PAGER_PREVIEW")
+	echo "${_enabled:-0}"
+}
+
+# ============================================================
+# Animation State Functions
+# ============================================================
+
+# Set animation enabled
+# Usage: nscde_style_set_animation_enabled ENABLED
+function nscde_style_set_animation_enabled
+{
+	local _enabled="$1"
+	nscde_style_set "NSCDE_ANIMATION_ENABLED" "$_enabled"
+}
+
+# Get animation enabled
+function nscde_style_get_animation_enabled
+{
+	local _enabled
+	_enabled=$(nscde_style_get "NSCDE_ANIMATION_ENABLED")
+	echo "${_enabled:-1}"
+}
+
+# Set animation effect
+# Usage: nscde_style_set_animation_effect EFFECT
+function nscde_style_set_animation_effect
+{
+	local _effect="$1"
+	nscde_style_set "NSCDE_ANIMATION_EFFECT" "$_effect"
+}
+
+# Get animation effect
+function nscde_style_get_animation_effect
+{
+	local _effect
+	_effect=$(nscde_style_get "NSCDE_ANIMATION_EFFECT")
+	echo "${_effect:-Frame}"
+}
+
+# Set animation delay
+# Usage: nscde_style_set_animation_delay DELAY
+function nscde_style_set_animation_delay
+{
+	local _delay="$1"
+	nscde_style_set "NSCDE_ANIMATION_DELAY" "$_delay"
+}
+
+# Get animation delay
+function nscde_style_get_animation_delay
+{
+	local _delay
+	_delay=$(nscde_style_get "NSCDE_ANIMATION_DELAY")
+	echo "${_delay:-10}"
+}
+
+# Set animation twist
+# Usage: nscde_style_set_animation_twist TWIST
+function nscde_style_set_animation_twist
+{
+	local _twist="$1"
+	nscde_style_set "NSCDE_ANIMATION_TWIST" "$_twist"
+}
+
+# Get animation twist
+function nscde_style_get_animation_twist
+{
+	local _twist
+	_twist=$(nscde_style_get "NSCDE_ANIMATION_TWIST")
+	echo "${_twist:-0}"
+}
+
+# Set animation width
+# Usage: nscde_style_set_animation_width WIDTH
+function nscde_style_set_animation_width
+{
+	local _width="$1"
+	nscde_style_set "NSCDE_ANIMATION_WIDTH" "$_width"
+}
+
+# Get animation width
+function nscde_style_get_animation_width
+{
+	local _width
+	_width=$(nscde_style_get "NSCDE_ANIMATION_WIDTH")
+	echo "${_width:-4}"
+}
+
+# Set animation iterations
+# Usage: nscde_style_set_animation_iterations ITERATIONS
+function nscde_style_set_animation_iterations
+{
+	local _iterations="$1"
+	nscde_style_set "NSCDE_ANIMATION_ITERATIONS" "$_iterations"
+}
+
+# Get animation iterations
+function nscde_style_get_animation_iterations
+{
+	local _iterations
+	_iterations=$(nscde_style_get "NSCDE_ANIMATION_ITERATIONS")
+	echo "${_iterations:-1}"
+}
+
+# ============================================================
+# Backend Config Generation Functions
+# ============================================================
+
+# Generate FVWM configuration from normalized state
+# Usage: nscde_style_generate_fvwm_config
+function nscde_style_generate_fvwm_config
+{
+	local _focus_policy _auto_raise _raise_delay _opaque_move _move_threshold
+	local _raise_transient _lower_transient _stack_transient
+	local _icon_placement _icon_fill _icon_size
+	local _edge_thickness _edge_resistance _edge_move_resistance _edge_move_delay
+	local _raise_fp_on_page _pager_preview
+	local _animation_enabled _animation_effect _animation_delay _animation_twist
+	local _animation_width _animation_iterations
+
+	# Read normalized state
+	_focus_policy=$(nscde_style_get_focus_policy)
+	_auto_raise=$(nscde_style_get_auto_raise)
+	_raise_delay=$(nscde_style_get_raise_delay)
+	_opaque_move=$(nscde_style_get_opaque_move)
+	_move_threshold=$(nscde_style_get_move_threshold)
+	_raise_transient=$(nscde_style_get_raise_transient)
+	_lower_transient=$(nscde_style_get_lower_transient)
+	_stack_transient=$(nscde_style_get_stack_transient)
+	_icon_placement=$(nscde_style_get_icon_placement)
+	_icon_fill=$(nscde_style_get_icon_fill)
+	_icon_size=$(nscde_style_get_icon_size)
+	_edge_thickness=$(nscde_style_get_edge_thickness)
+	_edge_resistance=$(nscde_style_get_edge_resistance)
+	_edge_move_resistance=$(nscde_style_get_edge_move_resistance)
+	_edge_move_delay=$(nscde_style_get_edge_move_delay)
+	_raise_fp_on_page=$(nscde_style_get_raise_fp_on_page)
+	_pager_preview=$(nscde_style_get_pager_preview)
+	_animation_enabled=$(nscde_style_get_animation_enabled)
+	_animation_effect=$(nscde_style_get_animation_effect)
+	_animation_delay=$(nscde_style_get_animation_delay)
+	_animation_twist=$(nscde_style_get_animation_twist)
+	_animation_width=$(nscde_style_get_animation_width)
+	_animation_iterations=$(nscde_style_get_animation_iterations)
+
+	# Generate NsCDE.conf
+	cat > "${FVWM_USERDIR}/NsCDE.conf" <<EOF
+# NsCDE Window Manager Configuration
+# Generated from normalized state - do not edit manually
+# Edit via WindowMgr or style state tools
+
+# Focus policy
+Style * ${_focus_policy}
+
+# Auto-raise
+InfoStoreAdd autoraisefocus ${_auto_raise}
+InfoStoreAdd afrmilisecs ${_raise_delay}
+
+# Transient handling
+Style * $([ "$_raise_transient" = "1" ] && echo "RaiseTransient" || echo "DontRaiseTransient")
+Style * $([ "$_lower_transient" = "1" ] && echo "LowerTransient" || echo "DontLowerTransient")
+Style * $([ "$_stack_transient" = "1" ] && echo "StackTransientParent" || echo "DontStackTransientParent")
+
+# Opaque move
+OpaqueMoveSize ${_opaque_move}
+
+# Move threshold
+MoveThreshold ${_move_threshold}
+
+# Icon placement
+InfoStoreAdd iconbox ${_icon_placement}
+Style * IconFill ${_icon_fill%%.*} ${_icon_fill##*.}
+
+# Icon size
+Style * IconSize ${_icon_size//,/ }
+
+# Page edges
+EdgeThickness ${_edge_thickness}
+EdgeResistance ${_edge_resistance}
+Style * EdgeMoveResistance ${_edge_move_resistance}
+Style * EdgeMoveDelay ${_edge_move_delay}
+InfoStoreAdd pageraisefp ${_raise_fp_on_page}
+InfoStoreAdd pageshowrootpager ${_pager_preview}
+EOF
+
+	# Generate Animate.fvwmgen
+	cat > "${FVWM_USERDIR}/Animate.fvwmgen" <<EOF
+# NsCDE Animation Configuration
+# Generated from normalized state - do not edit manually
+
+*FvwmAnimate: $([ "$_animation_enabled" = "1" ] && echo "Effect ${_animation_effect}" || echo "Effect None")
+*FvwmAnimate: Delay ${_animation_delay}
+*FvwmAnimate: Twist ${_animation_twist}
+*FvwmAnimate: Width ${_animation_width}
+*FvwmAnimate: Iterations ${_animation_iterations}
+EOF
+}
+
+# Generate labwc configuration from normalized state
+# Usage: nscde_style_generate_labwc_config
+#
+# For labwc, the primary config artifacts are:
+# - themerc: generated by nscde_labwc_theme from the current palette
+# - rc.xml: regenerated here with window behavior from normalized state
+# - menu.xml: generated by nscde_labwc at session start
+#
+# This function records backend-specific intent, regenerates labwc
+# theme when the palette has changed, and updates rc.xml with the
+# current window behavior settings from normalized state.
+function nscde_style_generate_labwc_config
+{
+	local _focus_policy _palette_path _palette_name
+	local _auto_raise _raise_delay _edge_thickness
+	local _rc_xml _follow_mouse _raise_on_focus
+
+	_focus_policy=$(nscde_style_get_focus_policy)
+	_palette_path=$(nscde_style_get_palette_path)
+	_palette_name=$(nscde_style_get_palette_name)
+	_auto_raise=$(nscde_style_get_auto_raise)
+	_raise_delay=$(nscde_style_get_raise_delay)
+	_edge_thickness=$(nscde_style_get_edge_thickness)
+
+	# Record focus intent for labwc
+	nscde_style_set "NSCDE_LABWC_FOCUS_INTENT" "$_focus_policy"
+
+	# Map focus policy to labwc rc.xml values
+	case "$_focus_policy" in
+		ClickToFocus)
+			_follow_mouse="no"
+			_raise_on_focus="yes"
+			;;
+		SloppyFocus)
+			_follow_mouse="yes"
+			_raise_on_focus="no"
+			;;
+		*)
+			_follow_mouse="yes"
+			_raise_on_focus="no"
+			;;
+	esac
+
+	# Update rc.xml focus and edge settings if config dir exists
+	_rc_xml="${NSCDE_LABWC_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/labwc-nscde}/rc.xml"
+	if [ -f "$_rc_xml" ]; then
+		# Update followMouse
+		if grep -q '<followMouse>' "$_rc_xml" 2>/dev/null; then
+			sed -i "s|<followMouse>[^<]*</followMouse>|<followMouse>${_follow_mouse}</followMouse>|g" "$_rc_xml"
+		fi
+		# Update raiseOnFocus
+		if grep -q '<raiseOnFocus>' "$_rc_xml" 2>/dev/null; then
+			sed -i "s|<raiseOnFocus>[^<]*</raiseOnFocus>|<raiseOnFocus>${_raise_on_focus}</raiseOnFocus>|g" "$_rc_xml"
+		fi
+	fi
+
+	# Regenerate labwc theme if palette is set and theme generator exists
+	if [ -n "$_palette_path" ] && [ -r "$_palette_path" ]; then
+		export NSCDE_PALETTE_FILE="$_palette_path"
+		if [ -x "${NSCDE_TOOLSDIR}/nscde_labwc_theme" ]; then
+			"${NSCDE_TOOLSDIR}/nscde_labwc_theme" >/dev/null 2>&1
+		fi
+	fi
+}
+
+# Generate backend-specific configuration from normalized state
+# Usage: nscde_style_generate_config [BACKEND]
+function nscde_style_generate_config
+{
+	local _backend="${1:-$NSCDE_BACKEND}"
+
+	case "$_backend" in
+		fvwm|fvwm3)
+			nscde_style_generate_fvwm_config
+			;;
+		labwc)
+			nscde_style_generate_labwc_config
+			;;
+		*)
+			echo "Warning: Unknown backend $_backend" >&2
+			;;
+	esac
+}
+
+# ============================================================
+# Migration Functions
+# ============================================================
+
+# Migrate existing FVWM config to normalized state
+# Usage: nscde_style_migrate_from_fvwm
+function nscde_style_migrate_from_fvwm
+{
+	local _nsCDE_conf="${FVWM_USERDIR}/NsCDE.conf"
+
+	if [ ! -f "$_nsCDE_conf" ]; then
+		return 0
+	fi
+
+	# Extract focus policy
+	if grep -q "Style.*ClickToFocus" "$_nsCDE_conf"; then
+		nscde_style_set_focus_policy "ClickToFocus"
+	elif grep -q "Style.*SloppyFocus" "$_nsCDE_conf"; then
+		nscde_style_set_focus_policy "SloppyFocus"
+	else
+		nscde_style_set_focus_policy "MouseFocus"
+	fi
+
+	# Extract auto-raise
+	if grep -q "InfoStoreAdd autoraisefocus 1" "$_nsCDE_conf"; then
+		nscde_style_set_auto_raise "1"
+	else
+		nscde_style_set_auto_raise "0"
+	fi
+
+	# Extract raise delay
+	local _raise_delay
+	_raise_delay=$(grep "InfoStoreAdd afrmilisecs" "$_nsCDE_conf" | awk '{print $3}')
+	if [ -n "$_raise_delay" ]; then
+		nscde_style_set_raise_delay "$_raise_delay"
+	fi
+
+	# Extract transient handling
+	if grep -q "Style.*RaiseTransient" "$_nsCDE_conf"; then
+		nscde_style_set_raise_transient "1"
+	else
+		nscde_style_set_raise_transient "0"
+	fi
+
+	if grep -q "Style.*LowerTransient" "$_nsCDE_conf"; then
+		nscde_style_set_lower_transient "1"
+	else
+		nscde_style_set_lower_transient "0"
+	fi
+
+	if grep -q "Style.*StackTransientParent" "$_nsCDE_conf"; then
+		nscde_style_set_stack_transient "1"
+	else
+		nscde_style_set_stack_transient "0"
+	fi
+
+	# Extract opaque move
+	local _opaque_move
+	_opaque_move=$(grep "OpaqueMoveSize" "$_nsCDE_conf" | awk '{print $2}')
+	if [ -n "$_opaque_move" ]; then
+		nscde_style_set_opaque_move "$_opaque_move"
+	fi
+
+	# Extract move threshold
+	local _move_threshold
+	_move_threshold=$(grep "MoveThreshold" "$_nsCDE_conf" | awk '{print $2}')
+	if [ -n "$_move_threshold" ]; then
+		nscde_style_set_move_threshold "$_move_threshold"
+	fi
+
+	# Extract edge thickness
+	local _edge_thickness
+	_edge_thickness=$(grep "EdgeThickness" "$_nsCDE_conf" | awk '{print $2}')
+	if [ -n "$_edge_thickness" ]; then
+		nscde_style_set_edge_thickness "$_edge_thickness"
+	fi
+
+	# Extract edge resistance
+	local _edge_resistance
+	_edge_resistance=$(grep "EdgeResistance" "$_nsCDE_conf" | awk '{print $2}')
+	if [ -n "$_edge_resistance" ]; then
+		nscde_style_set_edge_resistance "$_edge_resistance"
+	fi
+
+	# Extract icon placement
+	if grep -q "InfoStoreAdd iconbox 1" "$_nsCDE_conf"; then
+		nscde_style_set_icon_placement "1"
+	else
+		nscde_style_set_icon_placement "0"
+	fi
+
+	echo "Migrated FVWM configuration to normalized state"
+}
+
+# ============================================================
+# Utility Functions
+# ============================================================
+
+# Dump all style state
+# Usage: nscde_style_dump
+function nscde_style_dump
+{
+	if [ -f "$NSCDE_STYLE_STATE_FILE" ]; then
+		cat "$NSCDE_STYLE_STATE_FILE"
+	else
+		echo "# No style state file found"
+	fi
+}
+
+# Reset all style state to defaults
+# Usage: nscde_style_reset
+function nscde_style_reset
+{
+	if [ -f "$NSCDE_STYLE_STATE_FILE" ]; then
+		rm -f "$NSCDE_STYLE_STATE_FILE"
+	fi
+	echo "Style state reset to defaults"
+}

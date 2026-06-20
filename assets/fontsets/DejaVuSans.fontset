@@ -1,0 +1,24 @@
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+font.variable.normal.small=xft:DejaVu Sans:Medium:Book:size=9
+font.variable.normal.medium=xft:DejaVu Sans:Medium:Book:size=11
+font.variable.normal.large=xft:DejaVu Sans:Medium:Book:size=12
+
+font.variable.bold.small=xft:DejaVu Sans:Medium:Bold:size=9
+font.variable.bold.medium=xft:DejaVu Sans:Medium:Bold:size=11
+font.variable.bold.large=xft:DejaVu Sans:Medium:Bold:size=12
+
+font.variable.italic.small=xft:DejaVu Sans:Medium:Oblique:size=9
+font.variable.italic.medium=xft:DejaVu Sans:Medium:Oblique:size=11
+font.variable.italic.large=xft:DejaVu Sans:Medium:Oblique:size=12
+
+font.monospaced.normal.small=xft:DejaVu Sans Mono:Medium:Book:size=10
+font.monospaced.normal.medium=xft:DejaVu Sans Mono:Medium:Book:size=12
+font.monospaced.normal.large=xft:DejaVu Sans Mono:Medium:Book:size=14
+
+font.monospaced.bold.small=xft:DejaVu Sans Mono:Medium:Bold:size=10
+font.monospaced.bold.medium.=xft:DejaVu Sans Mono:Medium:Bold:size=12
+font.monospaced.bold.large.=xft:DejaVu Sans Mono:Medium:Bold:size=14

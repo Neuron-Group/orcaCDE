@@ -1,0 +1,15 @@
+font.variable.normal.small=xft:Arimo:Medium:Regular:size=10
+font.variable.bold.small=xft:Arimo:Medium:Bold:size=10
+font.variable.italic.small=xft:Arimo:Medium:Italic:size=10
+font.monospaced.normal.small=xft:Cousine:Medium:Regular:size=10
+font.monospaced.bold.small=xft:Cousine:Medium:Bold:size=10
+font.variable.bold.medium=xft:Arimo:Medium:Bold:size=12
+font.variable.italic.medium=xft:Arimo:Medium:Italic:size=12
+font.variable.normal.medium=xft:Arimo:Medium:Regular:size=12
+font.monospaced.normal.medium=xft:Cousine:Medium:Regular:size=12
+font.monospaced.bold.medium=xft:Cousine:Medium:Bold:size=12
+font.variable.normal.large=xft:Arimo:Medium:Regular:size=14
+font.variable.bold.large=xft:Arimo:Medium:Bold:size=14
+font.variable.italic.large=xft:Arimo:Medium:Italic:size=14
+font.monospaced.normal.large=xft:Cousine:Medium:Regular:size=14
+font.monospaced.bold.large=xft:Cousine:Medium:Bold:size=14

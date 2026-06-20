@@ -1,0 +1,262 @@
+#!@KSH@
+
+#
+# nscde_labwc_menugen - Generate labwc menu.xml from NsCDE state
+#
+# Reads:
+#   - $NSCDE_DATADIR/defaults/AppMenus.conf (system)
+#   - $FVWM_USERDIR/AppMenus.conf (user override)
+#   - Environment: NSCDE_BACKEND, NSCDE_TOOLSDIR, NSCDE_DATADIR,
+#     FVWM_USERDIR, NSCDE_LABWC_WORKSPACES, NSCDE_LABWC_CONFIG_DIR
+#
+# Outputs: labwc-compatible openbox_menu XML to stdout
+#
+
+# Required environment
+if [ -z "$NSCDE_DATADIR" ] || [ -z "$NSCDE_TOOLSDIR" ]; then
+   echo "Error: NSCDE_DATADIR and NSCDE_TOOLSDIR must be set." >&2
+   exit 2
+fi
+
+FVWM_USERDIR="${FVWM_USERDIR:-${HOME}/.NsCDE}"
+NSCDE_LABWC_WORKSPACES="${NSCDE_LABWC_WORKSPACES:-One,Two,Three,Four}"
+
+# Locate terminal command (prefer weston-terminal, fall back to xterm)
+find_terminal()
+{
+   for term in weston-terminal xterm; do
+      if command -v "$term" >/dev/null 2>&1; then
+         echo "$term"
+         return
+      fi
+   done
+   echo "weston-terminal"
+}
+
+TERMINAL=$(find_terminal)
+
+# XML-escape a string (escape &, <, >, ", ')
+xml_escape()
+{
+   echo "$1" | sed -e 's/\&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g' -e "s/'/\&apos;/g"
+}
+
+# Strip FVWM gettext markers: $[gt.Text] -> Text
+strip_gt()
+{
+   echo "$1" | sed 's/\$\[gt\.\([^]]*\)\]/\1/g'
+}
+
+# Map a FVWM action to a labwc XML action element.
+# Returns 0 if a mapping was produced, 1 if the entry should be skipped.
+map_fvwm_action()
+{
+   _mfa_action="$1"
+   _mfa_label="$2"
+
+   case "$_mfa_action" in
+      # f_WideTerm: open a wide terminal
+      f_WideTerm)
+         printf '      <action name="Execute"><command>%s</command></action>\n' "$TERMINAL"
+         return 0
+         ;;
+      # Exec exec <cmd>: direct command execution
+      Exec\ exec\ *)
+         _mfa_cmd="${_mfa_action#Exec exec }"
+         # Strip FVWM quoting
+         _mfa_cmd="${_mfa_cmd%\"}"
+         _mfa_cmd="${_mfa_cmd#\"}"
+         printf '      <action name="Execute"><command>%s</command></action>\n' "$_mfa_cmd"
+         return 0
+         ;;
+      # Module FvwmScript: FVWM-only, skip
+      Module\ FvwmScript\ *)
+         return 1
+         ;;
+      # f_ToggleFvwmModule FvwmScript: FVWM-only, skip
+      f_ToggleFvwmModule\ FvwmScript\ *)
+         return 1
+         ;;
+      # f_ToggleFvwmFunc: FVWM-only, skip
+      f_ToggleFvwmFunc\ *)
+         return 1
+         ;;
+      # f_ToggleExecWindow: FVWM-only, skip
+      f_ToggleExecWindow\ *)
+         return 1
+         ;;
+      # f_FvwmLogMgmt: FVWM-only, skip
+      f_FvwmLogMgmt\ *)
+         return 1
+         ;;
+      # Anything else: skip
+      *)
+         return 1
+         ;;
+   esac
+}
+
+# Build workspace menu items from NSCDE_LABWC_WORKSPACES
+generate_workspace_menu()
+{
+   _ws_index=1
+   _ws_rest="$NSCDE_LABWC_WORKSPACES"
+   while [ -n "$_ws_rest" ]; do
+      case "$_ws_rest" in
+         *,*)
+            _ws_name="${_ws_rest%%,*}"
+            _ws_rest="${_ws_rest#*,}"
+            ;;
+         *)
+            _ws_name="$_ws_rest"
+            _ws_rest=""
+            ;;
+      esac
+      _ws_name=$(printf '%s' "$_ws_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -z "$_ws_name" ] && continue
+      _ws_escaped=$(xml_escape "$_ws_name")
+      printf '    <item label="Workspace %s">\n' "$_ws_escaped"
+      printf '      <action name="GoToDesktop" to="%d" />\n' "$_ws_index"
+      printf '    </item>\n'
+      _ws_index=$((_ws_index + 1))
+   done
+}
+
+# Generate application context menu entries from AppMenus.conf
+generate_app_menu_items()
+{
+   _menufilelist=""
+
+   if [ -r "$NSCDE_DATADIR/defaults/AppMenus.conf" ]; then
+      _menufilelist="$NSCDE_DATADIR/defaults/AppMenus.conf"
+   fi
+
+   if [ -r "$FVWM_USERDIR/AppMenus.conf" ]; then
+      if [ -n "$_menufilelist" ]; then
+         _menufilelist="$_menufilelist $FVWM_USERDIR/AppMenus.conf"
+      else
+         _menufilelist="$FVWM_USERDIR/AppMenus.conf"
+      fi
+   fi
+
+   if [ -z "$_menufilelist" ]; then
+      return
+   fi
+
+   # Deduplicate by label (keep last occurrence of each label)
+   # AppMenus.conf format: Class,Resource,Label,Action
+   # We process entries and emit unique items by label
+   _prev_label=""
+   # Use a temp file to avoid subshell from pipe
+   _tmpmenu=$(mktemp 2>/dev/null || echo "/tmp/nscde_menugen_$$.tmp")
+   cat $_menufilelist 2>/dev/null | grep -v '^#' | sort -t',' -k3,3 -u > "$_tmpmenu"
+   while IFS=',' read cls res label action
+   do
+      [ -z "$label" ] && continue
+      [ -z "$action" ] && continue
+
+      # Strip FVWM gettext markers from label
+      _clean_label=$(strip_gt "$label")
+      # Remove tab/keyboard shortcut suffixes (e.g., "Label\tShortcut")
+      _clean_label="${_clean_label%%	*}"
+      _clean_label=$(printf '%s' "$_clean_label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      [ -z "$_clean_label" ] && continue
+
+      # Try to map the action
+      _xml_action=$(map_fvwm_action "$action" "$_clean_label")
+      if [ $? -ne 0 ]; then
+         continue
+      fi
+
+      _escaped_label=$(xml_escape "$_clean_label")
+
+      # Add separator between different classes
+      if [ "$cls" != "$_prev_label" ] && [ -n "$_prev_label" ]; then
+         printf '    <separator />\n'
+      fi
+      _prev_label="$cls"
+
+      printf '    <item label="%s">\n' "$_escaped_label"
+      printf '%s\n' "$_xml_action"
+      printf '    </item>\n'
+   done < "$_tmpmenu"
+   rm -f "$_tmpmenu"
+}
+
+# Generate style manager sub-menu items
+generate_style_manager_menu()
+{
+   for _sm_tool in colormgr fontmgr backdropmgr windowmgr wsm; do
+      case "$_sm_tool" in
+         colormgr) _sm_label="Color Manager" ;;
+         fontmgr) _sm_label="Font Manager" ;;
+         backdropmgr) _sm_label="Backdrop Manager" ;;
+         windowmgr) _sm_label="Window Manager" ;;
+         wsm) _sm_label="Workspace Manager" ;;
+      esac
+      printf '    <item label="%s">\n' "$_sm_label"
+      printf '      <action name="Execute"><command>sh -c "QT_QPA_PLATFORM=wayland %s/nscde_labwc_%s"</command></action>\n' "$NSCDE_TOOLSDIR" "$_sm_tool"
+      printf '    </item>\n'
+   done
+   printf '    <separator />\n'
+   printf '    <item label="Icon Box">\n'
+   printf '      <action name="Execute"><command>sh -c "QT_QPA_PLATFORM=wayland %s/nscde_labwc_iconbox"</command></action>\n' "$NSCDE_TOOLSDIR"
+   printf '    </item>\n'
+   printf '    <item label="System Information">\n'
+   printf '      <action name="Execute"><command>sh -c "QT_QPA_PLATFORM=wayland %s/nscde_labwc_sysinfo"</command></action>\n' "$NSCDE_TOOLSDIR"
+   printf '    </item>\n'
+   printf '    <separator />\n'
+   printf '    <item label="System Action...">\n'
+   printf '      <action name="Execute"><command>sh -c "QT_QPA_PLATFORM=wayland %s/nscde_labwc_sysaction"</command></action>\n' "$NSCDE_TOOLSDIR"
+   printf '    </item>\n'
+}
+
+# Main: generate the full menu.xml
+generate_menu()
+{
+   cat <<HEADER
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_menu xmlns="http://openbox.org/3.4/menu">
+  <menu id="root-menu" label="NsCDE">
+    <item label="Terminal">
+      <action name="Execute"><command>${TERMINAL}</command></action>
+    </item>
+    <separator label="Style" />
+    <item label="Style Manager">
+      <action name="Execute"><command>sh -c 'QT_QPA_PLATFORM=wayland "${NSCDE_TOOLSDIR}/nscde_labwc_stylemgr"'</command></action>
+    </item>
+    <menu id="style-managers-menu" label="Style Managers">
+HEADER
+
+   generate_style_manager_menu
+
+   cat <<APPS
+    </menu>
+    <separator label="Applications" />
+APPS
+
+   generate_app_menu_items
+
+   cat <<WSMENU
+    <separator label="Workspaces" />
+WSMENU
+
+   generate_workspace_menu
+
+   cat <<FOOTER
+    <separator label="Session" />
+    <item label="System Action...">
+      <action name="Execute"><command>sh -c "QT_QPA_PLATFORM=wayland ${NSCDE_TOOLSDIR}/nscde_labwc_sysaction"</command></action>
+    </item>
+    <item label="Reconfigure labwc">
+      <action name="Reconfigure" />
+    </item>
+    <item label="Exit labwc">
+      <action name="Exit" />
+    </item>
+  </menu>
+</openbox_menu>
+FOOTER
+}
+
+generate_menu

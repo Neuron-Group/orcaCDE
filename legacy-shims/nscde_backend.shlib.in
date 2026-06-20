@@ -1,0 +1,1429 @@
+#
+# This file is a part of the NsCDE - Not so Common Desktop Environment
+# Author: Hegel3DReloaded
+# Licence: GPLv3
+#
+
+# NsCDE: Backend-agnostic state model and abstraction library.
+#
+# This library provides the normalized desktop state model used by NsCDE
+# shell tools. It defines the state schema, XDG path resolution, state
+# read/write operations, workspace helpers, and backend capability flags.
+#
+# Both the FVWM and labwc backends should use this library to maintain
+# a consistent state model that shell components can consume without
+# knowing backend-specific details.
+#
+# State files are stored as key=value pairs in STATE_DIR.
+# The state model covers session info, outputs, windows, workspaces,
+# and theme intent.
+
+##############################################################################
+# XDG path resolution
+##############################################################################
+
+# nscde_resolve_xdg_paths
+#
+# Sets NSCDE_XDG_CONFIG_HOME, NSCDE_XDG_CACHE_HOME, NSCDE_XDG_DATA_HOME
+# from environment or defaults. Safe to call multiple times.
+function nscde_resolve_xdg_paths
+{
+   if [ -n "$XDG_CONFIG_HOME" ]; then
+      NSCDE_XDG_CONFIG_HOME="$XDG_CONFIG_HOME"
+   else
+      NSCDE_XDG_CONFIG_HOME="$HOME/.config"
+   fi
+
+   if [ -n "$XDG_CACHE_HOME" ]; then
+      NSCDE_XDG_CACHE_HOME="$XDG_CACHE_HOME"
+   else
+      NSCDE_XDG_CACHE_HOME="$HOME/.cache"
+   fi
+
+   if [ -n "$XDG_DATA_HOME" ]; then
+      NSCDE_XDG_DATA_HOME="$XDG_DATA_HOME"
+   else
+      NSCDE_XDG_DATA_HOME="$HOME/.local/share"
+   fi
+
+   export NSCDE_XDG_CONFIG_HOME NSCDE_XDG_CACHE_HOME NSCDE_XDG_DATA_HOME
+}
+
+##############################################################################
+# Core NsCDE environment
+##############################################################################
+
+# nscde_backend_init
+#
+# Sets the standard NsCDE environment variables that all backend tools need.
+# This replaces duplicated variable setup in nscde_labwc, nscde_sessiond,
+# and other tools. Call once at startup before any state operations.
+function nscde_backend_init
+{
+   if [ -z "$NSCDE_BACKEND" ]; then
+      echo "Error: NSCDE_BACKEND not set." >&2
+      return 1
+   fi
+
+   if [ -z "$NSCDE_ROOT" ]; then
+      echo "Error: NSCDE_ROOT not set." >&2
+      return 1
+   fi
+
+   nscde_resolve_xdg_paths
+
+   export NSCDE_FVWM_USERDIR="${FVWM_USERDIR:-${HOME}/.NsCDE}"
+   export NSCDE_STATE_DIR="${NSCDE_XDG_CACHE_HOME}/nscde-stage1"
+   export NSCDE_THEMES_DIR="${NSCDE_XDG_DATA_HOME}/themes"
+
+   # Derived state file paths
+   NSCDE_STATE_FILE="${NSCDE_STATE_DIR}/session.env"
+   NSCDE_PANEL_FILE="${NSCDE_STATE_DIR}/panel.env"
+   NSCDE_WINDOWS_FILE="${NSCDE_STATE_DIR}/windows.env"
+   NSCDE_WORKSPACES_FILE="${NSCDE_STATE_DIR}/workspaces.env"
+   NSCDE_COMMAND_FIFO="${NSCDE_STATE_DIR}/sessiond.fifo"
+   NSCDE_PAGER_COMMAND_FIFO="${NSCDE_STATE_DIR}/pagerd.fifo"
+   NSCDE_TOPLEVEL_COMMAND_FIFO="${NSCDE_STATE_DIR}/topleveld.fifo"
+   NSCDE_PID_FILE="${NSCDE_STATE_DIR}/sessiond.pid"
+   NSCDE_PANEL_LAYOUT_FILE="${NSCDE_STATE_DIR}/panel-layout.env"
+   NSCDE_SUBPANEL_FILE="${NSCDE_STATE_DIR}/subpanels.env"
+   NSCDE_BACKDROP_OUTPUT_FILE="${NSCDE_STATE_DIR}/backdrops.env"
+
+   export NSCDE_STATE_DIR NSCDE_STATE_FILE NSCDE_PANEL_FILE
+   export NSCDE_WINDOWS_FILE NSCDE_WORKSPACES_FILE
+   export NSCDE_COMMAND_FIFO NSCDE_PID_FILE NSCDE_PANEL_LAYOUT_FILE
+   export NSCDE_PAGER_COMMAND_FIFO NSCDE_TOPLEVEL_COMMAND_FIFO
+   export NSCDE_SUBPANEL_FILE NSCDE_BACKDROP_OUTPUT_FILE
+
+   # Workspace defaults
+   export NSCDE_WORKSPACES="${NSCDE_LABWC_WORKSPACES:-One,Two,Three,Four}"
+   export NSCDE_CURRENT_WORKSPACE="${NSCDE_LABWC_CURRENT_WORKSPACE:-One}"
+   export NSCDE_THEME_NAME="${NSCDE_LABWC_THEME_NAME:-NsCDE-Stage1}"
+}
+
+##############################################################################
+# State directory management
+##############################################################################
+
+# nscde_state_ensure_dir
+#
+# Creates the state directory if it does not exist.
+function nscde_state_ensure_dir
+{
+   mkdir -p "$NSCDE_STATE_DIR"
+}
+
+##############################################################################
+# State read/write operations
+#
+# State files use simple key=value format.
+# Values must not contain newlines.
+# Keys use UPPER_SNAKE_CASE naming.
+##############################################################################
+
+# nscde_state_write FILE KEY VALUE
+#
+# Sets or updates a key=value pair in the given state file.
+# Creates the file if it does not exist.
+function nscde_state_write
+{
+   _sw_file=$1
+   _sw_key=$2
+   _sw_value=$3
+
+   if [ -f "$_sw_file" ]; then
+      if grep -q "^${_sw_key}=" "$_sw_file" 2>/dev/null; then
+         sed "s|^${_sw_key}=.*|${_sw_key}=${_sw_value}|" "$_sw_file" > "${_sw_file}.tmp"
+         mv "${_sw_file}.tmp" "$_sw_file"
+      else
+         printf '%s=%s\n' "$_sw_key" "$_sw_value" >> "$_sw_file"
+      fi
+   else
+      printf '%s=%s\n' "$_sw_key" "$_sw_value" > "$_sw_file"
+   fi
+}
+
+# nscde_state_read FILE KEY
+#
+# Prints the value for the given key from the state file.
+# Returns 1 if the key is not found.
+function nscde_state_read
+{
+   _sr_file=$1
+   _sr_key=$2
+
+   if [ ! -f "$_sr_file" ]; then
+      return 1
+   fi
+
+   _sr_line=$(grep "^${_sr_key}=" "$_sr_file" 2>/dev/null)
+   if [ -n "$_sr_line" ]; then
+      echo "${_sr_line#*=}"
+      return 0
+   fi
+   return 1
+}
+
+# nscde_state_write_file FILE CONTENTS
+#
+# Writes complete contents to a state file atomically.
+# Use this when updating the entire file at once (e.g., panel.env).
+function nscde_state_write_file
+{
+   _wf_file=$1
+   shift
+   printf '%s\n' "$@" > "${_wf_file}.tmp"
+   mv "${_wf_file}.tmp" "$_wf_file"
+}
+
+##############################################################################
+# Session state
+##############################################################################
+
+# nscde_session_publish
+#
+# Writes the session.env state file with current session metadata.
+function nscde_session_publish
+{
+   nscde_state_ensure_dir
+   cat > "$NSCDE_STATE_FILE" <<EOF
+NSCDE_BACKEND=${NSCDE_BACKEND:-unknown}
+NSCDE_VERSION=${NSCDE_VERSION:-unknown}
+NSCDE_LABWC_CONFIG_DIR=${NSCDE_LABWC_CONFIG_DIR:-}
+WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-}
+DISPLAY=${DISPLAY:-}
+NSCDE_SESSION_COMMAND_FIFO=$NSCDE_COMMAND_FIFO
+EOF
+}
+
+##############################################################################
+# Panel state
+##############################################################################
+
+# nscde_panel_publish
+#
+# Writes the panel.env state file consumed by the panel widget.
+# Includes palette colors when NSCDE_PALETTE_FILE is set, so that
+# palette-aware UI components can derive their styling from the
+# active CDE palette.
+function nscde_panel_publish
+{
+   nscde_state_ensure_dir
+
+   _pp_fp_variant=8
+   if type nscde_style_get_fp_variant >/dev/null 2>&1; then
+      _pp_fp_variant=$(nscde_style_get_fp_variant 2>/dev/null)
+      case "$_pp_fp_variant" in
+         5|8) ;;
+         *) _pp_fp_variant=8 ;;
+      esac
+   fi
+
+   cat > "$NSCDE_PANEL_FILE" <<EOF
+NSCDE_BACKEND=${NSCDE_BACKEND:-unknown}
+NSCDE_THEME_NAME=$NSCDE_THEME_NAME
+NSCDE_WORKSPACES=$NSCDE_WORKSPACES
+NSCDE_CURRENT_WORKSPACE=$NSCDE_CURRENT_WORKSPACE
+NSCDE_SESSION_COMMAND_FIFO=$NSCDE_COMMAND_FIFO
+NSCDE_FP_VARIANT=$_pp_fp_variant
+EOF
+
+   # Append palette colors if the palette file is available
+   if [ -r "$NSCDE_PALETTE_FILE" ]; then
+      _pp_idx=1
+      while IFS= read -r _pp_color
+      do
+         nscde_state_write "$NSCDE_PANEL_FILE" "NSCDE_PALETTE_${_pp_idx}" "$_pp_color"
+         _pp_idx=$((_pp_idx + 1))
+      done <<PAL_EOF
+$(nscde_palette_parse "$NSCDE_PALETTE_FILE")
+PAL_EOF
+   fi
+}
+
+# nscde_panel_layout_publish
+#
+# Writes the panel-layout.env state file with normalized panel geometry.
+# This decouples panel layout policy from client-local drawing code,
+# allowing the NsCDE core to own panel geometry while panel clients
+# consume the model as policy input.
+#
+# Values are derived from the visual reference measurements in
+# README.wayland-visual-reference.md and the FVWM reference config
+# FrontPanel.fvwm3.fvwmconf (96 DPI baseline).
+#
+# DPI scaling: when NSCDE_PANEL_SCALE is set (or derived from GDK_SCALE
+# or output scale), all pixel geometry values are multiplied by the scale
+# factor. The published values are the final scaled values ready for
+# direct use by the panel client. Fonts are NOT scaled (they use point
+# sizes which are resolution-independent).
+function nscde_panel_layout_publish
+{
+   nscde_state_ensure_dir
+
+   # DPI scale factor in percent (100=96DPI, 150=144DPI, 200=192DPI)
+   _pl_scale="${NSCDE_PANEL_SCALE:-${GDK_SCALE:-100}}"
+   case "$_pl_scale" in
+      1) _pl_scale=100 ;;
+      2) _pl_scale=200 ;;
+      100|125|150|175|200|225|250|300|400) ;;
+      [1-9][0-9]|[1-9][0-9][0-9]) ;;
+      *) _pl_scale=100 ;;
+   esac
+
+   # Helper: scale a pixel value by _pl_scale
+   # Usage: _scaled=$(_pl_px VALUE)
+   _pl_px() {
+      printf '%d' "$(( ($1 * _pl_scale + 50) / 100 ))"
+   }
+
+   # Edge and overall dimensions (classic CDE: 79px panel, 4px border, bottom)
+   _pl_height=$(_pl_px "${NSCDE_PANEL_HEIGHT:-79}")
+   _pl_edge="${NSCDE_PANEL_EDGE:-bottom}"
+   _pl_border=$(_pl_px "${NSCDE_PANEL_BORDER_WIDTH:-4}")
+
+   # Padding and gaps
+   _pl_margin=$(_pl_px "${NSCDE_PANEL_MARGIN:-0}")
+   _pl_padding_x=$(_pl_px "${NSCDE_PANEL_PADDING_X:-6}")
+   _pl_padding_y=$(_pl_px "${NSCDE_PANEL_PADDING_Y:-4}")
+
+   # Workspace section
+   _pl_ws_button_min_width=$(_pl_px "${NSCDE_PANEL_WORKSPACE_MIN_BUTTON_WIDTH:-84}")
+   _pl_ws_button_padding_x=$(_pl_px "${NSCDE_PANEL_WORKSPACE_BUTTON_PADDING_X:-10}")
+   _pl_ws_button_gap=$(_pl_px "${NSCDE_PANEL_WORKSPACE_BUTTON_GAP:-6}")
+   _pl_ws_recess_height=$(_pl_px "${NSCDE_PANEL_WORKSPACE_RECESS_HEIGHT:-32}")
+
+   # Bevel (FVWM container Frame 1 = 1px, scale-aware)
+   _pl_bevel_width=$(_pl_px "${NSCDE_PANEL_BEVEL_WIDTH:-1}")
+
+   # Font (classic CDE: variable.normal.small ≈ 9pt serif)
+   # Fonts use point sizes, not pixel sizes, so they are NOT scaled
+   _pl_font="${NSCDE_PANEL_FONT:-DejaVu Serif 9}"
+
+   # Section offsets (left launcher area is now computed by the panel
+   # client from launcher geometry; right area is still explicit)
+   _pl_right_area_width=$(_pl_px "${NSCDE_PANEL_RIGHT_AREA_WIDTH:-200}")
+
+   # Launcher area
+   _pl_left_modules="${NSCDE_PANEL_LEFT_MODULES:-clock,date,home,term,mail}"
+   _pl_launcher_unit_width=$(_pl_px "${NSCDE_PANEL_LAUNCHER_UNIT_WIDTH:-63}")
+   _pl_launcher_icon_size=$(_pl_px "${NSCDE_PANEL_LAUNCHER_ICON_SIZE:-48}")
+   _pl_launcher_gap=$(_pl_px "${NSCDE_PANEL_LAUNCHER_GAP:-0}")
+
+   # Right utility/applet bank
+   _pl_right_modules="${NSCDE_PANEL_RIGHT_MODULES:-print,style,apps,multimedia,help}"
+
+   # Applet unit width (right-area applet cell width)
+   _pl_applet_unit_width=$(_pl_px "${NSCDE_PANEL_APPLET_UNIT_WIDTH:-50}")
+
+   # Profile name (for future use: reference, compact, etc.)
+   _pl_profile="${NSCDE_PANEL_PROFILE:-reference}"
+
+   # Subpanel layout defaults
+   _pl_subpanel_entry_height=$(_pl_px "${NSCDE_PANEL_SUBPANEL_ENTRY_HEIGHT:-32}")
+   _pl_subpanel_icon_size=$(_pl_px "${NSCDE_PANEL_SUBPANEL_ICON_SIZE:-32}")
+   _pl_subpanel_title_height=$(_pl_px "${NSCDE_PANEL_SUBPANEL_TITLE_HEIGHT:-20}")
+   _pl_subpanel_padding=$(_pl_px "${NSCDE_PANEL_SUBPANEL_PADDING:-4}")
+
+   # ---- Section geometry (FVWM reference model) ----
+   # Handle widths (classic CDE: 21px each)
+   _pl_left_handle_width=$(_pl_px "${NSCDE_PANEL_LEFT_HANDLE_WIDTH:-21}")
+   _pl_right_handle_width=$(_pl_px "${NSCDE_PANEL_RIGHT_HANDLE_WIDTH:-21}")
+
+   # Vertical breakdown (classic CDE: 16+62+1 = 79px)
+   _pl_trigger_height=$(_pl_px "${NSCDE_PANEL_TRIGGER_HEIGHT:-16}")
+   _pl_body_height=$(_pl_px "${NSCDE_PANEL_BODY_HEIGHT:-62}")
+   _pl_bottom_strip_height=$(_pl_px "${NSCDE_PANEL_BOTTOM_STRIP_HEIGHT:-1}")
+
+   # Section separator width (FVWM Frame 1 bevel)
+   _pl_section_separator_width=$(_pl_px "${NSCDE_PANEL_SECTION_SEPARATOR_WIDTH:-1}")
+
+   # Applet gap (classic CDE: 4px between applets)
+   _pl_applet_gap=$(_pl_px "${NSCDE_PANEL_RIGHT_APPLET_GAP:-4}")
+
+   # Desk count for WSM width calculation
+   _pl_desk_count="${NSCDE_DESK_COUNT:-4}"
+
+   # WSM section width (from FrontPanel.fvwm3.fvwmconf)
+   # Classic widths: 2=211, 4=343, 6=475, 8=607
+   # Formula: 211 + (desk_count - 2) * 66 for desk_count >= 2
+   #          79 for desk_count = 0 (eco mode)
+   # Scale-aware: base values are computed first, then scaled
+   case "$_pl_desk_count" in
+      0) _pl_wsm_width_base=79 ;;
+      2) _pl_wsm_width_base=211 ;;
+      4) _pl_wsm_width_base=343 ;;
+      6) _pl_wsm_width_base=475 ;;
+      8) _pl_wsm_width_base=607 ;;
+      *) _pl_wsm_width_base=$((211 + (_pl_desk_count - 2) * 66)) ;;
+   esac
+   _pl_wsm_width_base="${NSCDE_PANEL_WSM_WIDTH:-$_pl_wsm_width_base}"
+   _pl_wsm_width=$(_pl_px "$_pl_wsm_width_base")
+
+   # WSM internal sub-section widths (FVWM column units)
+   # Lock=2cols, PGM=2cols, WSM buttons=GeoW cols, Lite=2cols, Exit=2cols
+   case "$_pl_desk_count" in
+      0)
+         _pl_wsm_cols=4
+         _pl_wsm_geow=0
+         ;;
+      2)
+         _pl_wsm_cols=8
+         _pl_wsm_geow=7
+         ;;
+      4)
+         _pl_wsm_cols=16
+         _pl_wsm_geow=14
+         ;;
+      6)
+         _pl_wsm_cols=24
+         _pl_wsm_geow=21
+         ;;
+      8)
+         _pl_wsm_cols=32
+         _pl_wsm_geow=28
+         ;;
+      *)
+         _pl_wsm_cols=$((_pl_desk_count * 4))
+         _pl_wsm_geow=$(((_pl_desk_count * 7) / 2))
+         ;;
+   esac
+   _pl_wsm_lock_width="${NSCDE_PANEL_WSM_LOCK_WIDTH:-2}"
+   _pl_wsm_exit_width="${NSCDE_PANEL_WSM_EXIT_WIDTH:-2}"
+
+   # WSM button area width (FVWM: desknum * 7 / 2 column-units, but
+   # we publish the pixel width for client consumption)
+   _pl_wsm_side_width=$(((_pl_wsm_width * _pl_wsm_lock_width) + (_pl_wsm_cols / 2)))
+   _pl_wsm_side_width=$((_pl_wsm_side_width / _pl_wsm_cols))
+   _pl_wsm_utility_width=$(((_pl_wsm_width * _pl_wsm_exit_width) + (_pl_wsm_cols / 2)))
+   _pl_wsm_utility_width=$((_pl_wsm_utility_width / _pl_wsm_cols))
+   _pl_wsm_buttons_width=$((_pl_wsm_width - _pl_wsm_side_width - _pl_wsm_utility_width))
+   _pl_wsm_buttons_width="${NSCDE_PANEL_WSM_BUTTONS_WIDTH:-$_pl_wsm_buttons_width}"
+
+   # Left/right launcher bank widths (computed from module lists)
+   # Count modules in left_modules and right_modules
+   _pl_left_count=0
+   if [ -n "$_pl_left_modules" ]; then
+      _pl_left_count=$(printf '%s\n' "$_pl_left_modules" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+   fi
+   _pl_right_count=0
+   if [ -n "$_pl_right_modules" ]; then
+      _pl_right_count=$(printf '%s\n' "$_pl_right_modules" | tr ',' '\n' | sed '/^[[:space:]]*$/d' | wc -l | tr -d ' ')
+   fi
+
+   if [ "$_pl_left_count" -gt 0 ]; then
+      _pl_left_bank_width=$((_pl_left_count * _pl_launcher_unit_width))
+   else
+      _pl_left_bank_width=0
+   fi
+   _pl_left_bank_width="${NSCDE_PANEL_LEFT_BANK_WIDTH:-$_pl_left_bank_width}"
+
+   # Center section X (starts after left handle + left bank)
+   _pl_center_section_x=$((_pl_left_handle_width + _pl_left_bank_width))
+   _pl_center_section_x="${NSCDE_PANEL_CENTER_SECTION_X:-$_pl_center_section_x}"
+
+   # Center section width (WSM width from classic model)
+   _pl_center_section_width="$_pl_wsm_width"
+   _pl_center_section_width="${NSCDE_PANEL_CENTER_SECTION_WIDTH:-$_pl_center_section_width}"
+
+   # WSM internal geometry published explicitly so the client can render
+   # from normalized layout state instead of carrying local policy math.
+   _pl_wsm_inner_pad=$(_pl_px "${NSCDE_PANEL_WSM_INNER_PAD:-5}")
+   _pl_wsm_side_width="${NSCDE_PANEL_WSM_SIDE_WIDTH:-$_pl_wsm_side_width}"
+   _pl_wsm_utility_width="${NSCDE_PANEL_WSM_UTILITY_WIDTH:-$_pl_wsm_utility_width}"
+   _pl_wsm_section_gap=$(_pl_px "${NSCDE_PANEL_WSM_SECTION_GAP:-6}")
+   _pl_wsm_grid_vpad=$(_pl_px "${NSCDE_PANEL_WSM_GRID_VPAD:-3}")
+   _pl_wsm_lock_height=$(_pl_px "${NSCDE_PANEL_WSM_LOCK_HEIGHT:-34}")
+   _pl_wsm_load_inset_top=$(_pl_px "${NSCDE_PANEL_WSM_LOAD_INSET_TOP:-8}")
+   _pl_wsm_load_inset_side=$(_pl_px "${NSCDE_PANEL_WSM_LOAD_INSET_SIDE:-5}")
+   _pl_wsm_load_height=$(_pl_px "${NSCDE_PANEL_WSM_LOAD_HEIGHT:-14}")
+   _pl_wsm_exit_height=$(_pl_px "${NSCDE_PANEL_WSM_EXIT_HEIGHT:-30}")
+   _pl_wsm_exit_inset_bottom=$(_pl_px "${NSCDE_PANEL_WSM_EXIT_INSET_BOTTOM:-4}")
+   _pl_wsm_utility_inset_side=$(_pl_px "${NSCDE_PANEL_WSM_UTILITY_INSET_SIDE:-5}")
+
+   # Font size for applets (point sizes, not scaled)
+   _pl_applet_date_font="${NSCDE_PANEL_APPLET_DATE_FONT:-DejaVu Sans Bold 12}"
+   _pl_applet_mail_font="${NSCDE_PANEL_APPLET_MAIL_FONT:-DejaVu Sans 10}"
+   _pl_ws_font="${NSCDE_PANEL_WS_FONT:-DejaVu Serif 10}"
+
+   # Applet sizes (per-applet, matching FVWM originals)
+   _pl_applet_clock_size=$(_pl_px "${NSCDE_PANEL_APPLET_CLOCK_SIZE:-56}")
+   _pl_applet_date_size=$(_pl_px "${NSCDE_PANEL_APPLET_DATE_SIZE:-56}")
+   _pl_applet_mail_size=$(_pl_px "${NSCDE_PANEL_APPLET_MAIL_SIZE:-56}")
+   _pl_applet_load_width=$(_pl_px "${NSCDE_PANEL_APPLET_LOAD_WIDTH:-36}")
+   _pl_applet_load_height=$(_pl_px "${NSCDE_PANEL_APPLET_LOAD_HEIGHT:-34}")
+
+   if [ -n "$_pl_right_modules" ]; then
+      _pl_right_bank_width=0
+      _pl_first_right=1
+      _pl_old_ifs=$IFS
+      IFS=,
+      set -- $_pl_right_modules
+      IFS=$_pl_old_ifs
+      for _pl_mod in "$@"; do
+         case "$_pl_mod" in
+            clock) _pl_mod_width=$_pl_applet_clock_size ;;
+            date) _pl_mod_width=$_pl_applet_date_size ;;
+            mail) _pl_mod_width=$_pl_applet_mail_size ;;
+            load) _pl_mod_width=$_pl_applet_load_width ;;
+            *) _pl_mod_width=$_pl_launcher_unit_width ;;
+         esac
+         if [ "$_pl_first_right" -eq 1 ]; then
+            _pl_right_bank_width=$_pl_mod_width
+            _pl_first_right=0
+         else
+            _pl_right_bank_width=$((_pl_right_bank_width + _pl_applet_gap + _pl_mod_width))
+         fi
+      done
+   else
+      _pl_right_bank_width=0
+   fi
+   _pl_right_bank_width="${NSCDE_PANEL_RIGHT_BANK_WIDTH:-$_pl_right_bank_width}"
+
+   nscde_state_write_file "$NSCDE_PANEL_LAYOUT_FILE" \
+      "NSCDE_PANEL_HEIGHT=$_pl_height" \
+      "NSCDE_PANEL_EDGE=$_pl_edge" \
+      "NSCDE_PANEL_BORDER_WIDTH=$_pl_border" \
+      "NSCDE_PANEL_MARGIN=$_pl_margin" \
+      "NSCDE_PANEL_PADDING_X=$_pl_padding_x" \
+      "NSCDE_PANEL_PADDING_Y=$_pl_padding_y" \
+      "NSCDE_PANEL_WORKSPACE_MIN_BUTTON_WIDTH=$_pl_ws_button_min_width" \
+      "NSCDE_PANEL_WORKSPACE_BUTTON_PADDING_X=$_pl_ws_button_padding_x" \
+      "NSCDE_PANEL_WORKSPACE_BUTTON_GAP=$_pl_ws_button_gap" \
+      "NSCDE_PANEL_WORKSPACE_RECESS_HEIGHT=$_pl_ws_recess_height" \
+      "NSCDE_PANEL_BEVEL_WIDTH=$_pl_bevel_width" \
+      "NSCDE_PANEL_FONT=$_pl_font" \
+      "NSCDE_PANEL_RIGHT_AREA_WIDTH=$_pl_right_area_width" \
+      "NSCDE_PANEL_LEFT_MODULES=$_pl_left_modules" \
+      "NSCDE_PANEL_LAUNCHER_UNIT_WIDTH=$_pl_launcher_unit_width" \
+      "NSCDE_PANEL_LAUNCHER_ICON_SIZE=$_pl_launcher_icon_size" \
+      "NSCDE_PANEL_LAUNCHER_GAP=$_pl_launcher_gap" \
+      "NSCDE_PANEL_RIGHT_MODULES=$_pl_right_modules" \
+      "NSCDE_PANEL_APPLET_UNIT_WIDTH=$_pl_applet_unit_width" \
+      "NSCDE_PANEL_PROFILE=$_pl_profile" \
+      "NSCDE_PANEL_SUBPANEL_ENTRY_HEIGHT=$_pl_subpanel_entry_height" \
+      "NSCDE_PANEL_SUBPANEL_ICON_SIZE=$_pl_subpanel_icon_size" \
+      "NSCDE_PANEL_SUBPANEL_TITLE_HEIGHT=$_pl_subpanel_title_height" \
+      "NSCDE_PANEL_SUBPANEL_PADDING=$_pl_subpanel_padding" \
+      "NSCDE_PANEL_LEFT_HANDLE_WIDTH=$_pl_left_handle_width" \
+      "NSCDE_PANEL_RIGHT_HANDLE_WIDTH=$_pl_right_handle_width" \
+      "NSCDE_PANEL_TRIGGER_HEIGHT=$_pl_trigger_height" \
+      "NSCDE_PANEL_BODY_HEIGHT=$_pl_body_height" \
+      "NSCDE_PANEL_BOTTOM_STRIP_HEIGHT=$_pl_bottom_strip_height" \
+      "NSCDE_PANEL_SECTION_SEPARATOR_WIDTH=$_pl_section_separator_width" \
+      "NSCDE_PANEL_RIGHT_APPLET_GAP=$_pl_applet_gap" \
+      "NSCDE_DESK_COUNT=$_pl_desk_count" \
+      "NSCDE_PANEL_WSM_WIDTH=$_pl_wsm_width" \
+      "NSCDE_PANEL_WSM_LOCK_WIDTH=$_pl_wsm_lock_width" \
+      "NSCDE_PANEL_WSM_EXIT_WIDTH=$_pl_wsm_exit_width" \
+      "NSCDE_PANEL_WSM_BUTTONS_WIDTH=$_pl_wsm_buttons_width" \
+      "NSCDE_PANEL_LEFT_LAUNCHER_COUNT=$_pl_left_count" \
+      "NSCDE_PANEL_RIGHT_LAUNCHER_COUNT=$_pl_right_count" \
+      "NSCDE_PANEL_LEFT_LAUNCHER_UNIT_WIDTH=$_pl_launcher_unit_width" \
+      "NSCDE_PANEL_RIGHT_LAUNCHER_UNIT_WIDTH=$_pl_launcher_unit_width" \
+      "NSCDE_PANEL_LEFT_BANK_WIDTH=$_pl_left_bank_width" \
+      "NSCDE_PANEL_RIGHT_BANK_WIDTH=$_pl_right_bank_width" \
+      "NSCDE_PANEL_CENTER_SECTION_X=$_pl_center_section_x" \
+      "NSCDE_PANEL_CENTER_SECTION_WIDTH=$_pl_center_section_width" \
+      "NSCDE_PANEL_WSM_INNER_PAD=$_pl_wsm_inner_pad" \
+      "NSCDE_PANEL_WSM_SIDE_WIDTH=$_pl_wsm_side_width" \
+      "NSCDE_PANEL_WSM_UTILITY_WIDTH=$_pl_wsm_utility_width" \
+      "NSCDE_PANEL_WSM_SECTION_GAP=$_pl_wsm_section_gap" \
+      "NSCDE_PANEL_WSM_GRID_VPAD=$_pl_wsm_grid_vpad" \
+      "NSCDE_PANEL_WSM_LOCK_HEIGHT=$_pl_wsm_lock_height" \
+      "NSCDE_PANEL_WSM_LOAD_INSET_TOP=$_pl_wsm_load_inset_top" \
+      "NSCDE_PANEL_WSM_LOAD_INSET_SIDE=$_pl_wsm_load_inset_side" \
+      "NSCDE_PANEL_WSM_LOAD_HEIGHT=$_pl_wsm_load_height" \
+      "NSCDE_PANEL_WSM_EXIT_HEIGHT=$_pl_wsm_exit_height" \
+      "NSCDE_PANEL_WSM_EXIT_INSET_BOTTOM=$_pl_wsm_exit_inset_bottom" \
+      "NSCDE_PANEL_WSM_UTILITY_INSET_SIDE=$_pl_wsm_utility_inset_side" \
+      "NSCDE_PANEL_SCALE=$_pl_scale" \
+      "NSCDE_PANEL_WS_FONT=$_pl_ws_font" \
+      "NSCDE_PANEL_APPLET_DATE_FONT=$_pl_applet_date_font" \
+      "NSCDE_PANEL_APPLET_MAIL_FONT=$_pl_applet_mail_font" \
+      "NSCDE_PANEL_APPLET_CLOCK_SIZE=$_pl_applet_clock_size" \
+      "NSCDE_PANEL_APPLET_DATE_SIZE=$_pl_applet_date_size" \
+      "NSCDE_PANEL_APPLET_MAIL_SIZE=$_pl_applet_mail_size" \
+      "NSCDE_PANEL_APPLET_LOAD_WIDTH=$_pl_applet_load_width" \
+      "NSCDE_PANEL_APPLET_LOAD_HEIGHT=$_pl_applet_load_height"
+}
+
+##############################################################################
+# Subpanel state
+##############################################################################
+
+# nscde_subpanel_publish
+#
+# Reads Subpanels.actions and writes a normalized subpanels.env state file
+# consumable by the panel daemon. Each subpanel gets an ID (S1-S20),
+# name, width, enabled flag, entry count, and per-entry rows.
+#
+# The output format uses flat key=value pairs with indexed keys:
+#   NSCDE_SUBPANEL_COUNT=<n>
+#   NSCDE_SUBPANEL_<N>_NAME=<name>
+#   NSCDE_SUBPANEL_<N>_WIDTH=<px>
+#   NSCDE_SUBPANEL_<N>_ENABLED=<0|1>
+#   NSCDE_SUBPANEL_<N>_ENTRY_COUNT=<n>
+#   NSCDE_SUBPANEL_<N>_ENTRY_<M>_TITLE=<title>
+#   NSCDE_SUBPANEL_<N>_ENTRY_<M>_TYPE=<FVWM-F|FVWM-M|NOCHK|CHECK:app|>
+#   NSCDE_SUBPANEL_<N>_ENTRY_<M>_ICON=<icon-path>
+#   NSCDE_SUBPANEL_<N>_ENTRY_<M>_COMMAND=<command>
+#
+# Looks for Subpanels.actions in user dir first, then system defaults.
+# translate_fvwm_subcmd COMMAND
+#
+# Translates a FVWM subpanel entry command to a labwc-compatible shell command.
+# For the FVWM backend, strips nscde_fvwmclnt wrapper and converts $[infostore.X]
+# to ${NSCDE_INFOSTORE_X}. For the labwc backend, also maps known FVWM functions
+# (f_ToggleFvwmModule, f_ToggleFvwmFunc, f_DisplayURL) to native equivalents.
+# Unknown FVWM functions are skipped (empty result).
+function translate_fvwm_subcmd
+{
+   _ts_cmd="$1"
+
+   # Unescape FVWM quoting: \" -> "
+   _ts_cmd=$(printf '%s' "$_ts_cmd" | sed 's/\\"/"/g')
+
+   # Strip nscde_fvwmclnt wrapper: nscde_fvwmclnt "CMD" -> CMD
+   case "$_ts_cmd" in
+      nscde_fvwmclnt\ *)
+         _ts_inner="${_ts_cmd#nscde_fvwmclnt }"
+         _ts_inner="${_ts_inner#\"}"
+         _ts_inner="${_ts_inner%\"}"
+         _ts_cmd="$_ts_inner"
+         ;;
+   esac
+
+   # labwc-specific: translate FVWM internal functions to native equivalents
+   if [ "$NSCDE_BACKEND" = "labwc" ]; then
+      case "$_ts_cmd" in
+         # FvwmScript StyleMgr -> native style manager toolbar
+         f_ToggleFvwmModule\ FvwmScript\ StyleMgr)
+            _ts_cmd="nscde_labwc_stylemgr"
+            ;;
+         # FvwmScript Sysinfo -> native system info
+         f_ToggleFvwmModule\ FvwmScript\ Sysinfo)
+            _ts_cmd="nscde_labwc_sysinfo"
+            ;;
+         # FvwmScript NProcMgr -> native process manager
+         f_ToggleFvwmModule\ FvwmScript\ NProcMgr*)
+            _ts_cmd="nscde_labwc_nprocmgr"
+            ;;
+         # Other FvwmScript modules: skip (no native equivalent)
+         f_ToggleFvwmModule\ FvwmScript\ *)
+            _ts_cmd=""
+            ;;
+         # Other FvwmScript modules via Module command: skip
+         Module\ FvwmScript\ *)
+            _ts_cmd=""
+            ;;
+         # ExecDialog -> terminal command runner
+         f_ToggleFvwmFunc\ ExecDialog*)
+            _ts_cmd="${TERMINAL:-xterm} -e sh -c 'echo \"Enter command:\"; read cmd; eval \"\$cmd\"; read'"
+            ;;
+         # GWM -> native Workspace Manager
+         f_ToggleFvwmFunc\ GWM*)
+            _ts_cmd="QT_QPA_PLATFORM=wayland ${NSCDE_TOOLSDIR}/nscde_labwc_wsm"
+            ;;
+         # WatchErrors -> system log viewer
+         f_ToggleFvwmFunc\ WatchWinMgrErrors*)
+            _ts_cmd="${TERMINAL:-xterm} -e journalctl -f"
+            ;;
+         # Other f_ToggleFvwmFunc: skip
+         f_ToggleFvwmFunc\ *)
+            _ts_cmd=""
+            ;;
+         # f_DisplayURL -> xdg-open with NSCDE_ROOT path
+         f_DisplayURL\ *)
+            # Extract doc path (last argument)
+            _ts_docpath="${_ts_cmd##* }"
+            _ts_docpath="${_ts_docpath#\"}"
+            _ts_docpath="${_ts_docpath%\"}"
+            _ts_cmd="xdg-open ${NSCDE_ROOT:-/opt/NsCDE}/share/doc/nscde/$_ts_docpath"
+            ;;
+         # Convert FVWM $[infostore.X] to shell $NSCDE_INFOSTORE_X
+         *'$[infostore.'*)
+            _ts_cmd=$(printf '%s' "$_ts_cmd" | sed 's/\$\[infostore\.\([^]]*\)\]/${NSCDE_INFOSTORE_\1}/g')
+            ;;
+      esac
+   else
+      # FVWM backend: strip nscde_fvwmclnt and convert variable syntax
+      case "$_ts_cmd" in
+         *'$[infostore.'*)
+            _ts_cmd=$(printf '%s' "$_ts_cmd" | sed 's/\$\[infostore\.\([^]]*\)\]/${NSCDE_INFOSTORE_\1}/g')
+            ;;
+      esac
+   fi
+
+   printf '%s' "$_ts_cmd"
+}
+
+function nscde_subpanel_publish
+{
+   nscde_state_ensure_dir
+
+   _sp_user_file="${NSCDE_FVWM_USERDIR}/Subpanels.actions"
+   _sp_sys_file="${NSCDE_ROOT}/data/defaults/Subpanels.actions"
+
+   if [ -r "$_sp_user_file" ]; then
+      _sp_file="$_sp_user_file"
+   elif [ -r "$_sp_sys_file" ]; then
+      _sp_file="$_sp_sys_file"
+   else
+      printf 'NSCDE_SUBPANEL_COUNT=0\n' > "$NSCDE_SUBPANEL_FILE"
+      return
+   fi
+
+   _sp_total=0
+   _sp_output=""
+
+   for _sp_id in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 \
+      S11 S12 S13 S14 S15 S16 S17 S18 S19 S20
+   do
+      _sp_idx=${_sp_id#S}
+      _sp_name=""
+      _sp_width="160"
+      _sp_enabled="0"
+      _sp_entry_count=0
+      _sp_entry_output=""
+
+      while IFS= read -r _sp_line
+      do
+         case "$_sp_line" in
+            ${_sp_id},NAME,*)
+               _sp_name="${_sp_line#${_sp_id},NAME,}"
+               ;;
+            ${_sp_id},WIDTH,*)
+               _sp_width="${_sp_line#${_sp_id},WIDTH,}"
+               ;;
+            ${_sp_id},ENABLED,*)
+               _sp_enabled="${_sp_line#${_sp_id},ENABLED,}"
+               ;;
+            ${_sp_id},ENTRY,*)
+               _sp_entry_data="${_sp_line#${_sp_id},ENTRY,}"
+               _sp_eidx=$((_sp_entry_count + 1))
+
+               # Parse CSV fields: title, type, icon, command
+               _sp_e_title=$(printf '%s' "$_sp_entry_data" | cut -d',' -f1)
+               _sp_e_type=$(printf '%s' "$_sp_entry_data" | cut -d',' -f2)
+               _sp_e_icon=$(printf '%s' "$_sp_entry_data" | cut -d',' -f3)
+               _sp_e_cmd=$(printf '%s' "$_sp_entry_data" | cut -d',' -f4-)
+
+               # Strip i18n $[gt....] wrapper from titles
+               _sp_e_title=$(printf '%s' "$_sp_e_title" | sed 's/\$\[gt\.\(.*\)\]/\1/')
+
+               # Translate FVWM commands to backend-appropriate shell commands
+               _sp_e_cmd=$(translate_fvwm_subcmd "$_sp_e_cmd")
+
+               _sp_entry_output="${_sp_entry_output}NSCDE_SUBPANEL_${_sp_idx}_ENTRY_${_sp_eidx}_TITLE=${_sp_e_title}
+NSCDE_SUBPANEL_${_sp_idx}_ENTRY_${_sp_eidx}_TYPE=${_sp_e_type}
+NSCDE_SUBPANEL_${_sp_idx}_ENTRY_${_sp_eidx}_ICON=${_sp_e_icon}
+NSCDE_SUBPANEL_${_sp_idx}_ENTRY_${_sp_eidx}_COMMAND=${_sp_e_cmd}
+"
+               _sp_entry_count=$((_sp_entry_count + 1))
+               ;;
+         esac
+      done < "$_sp_file"
+
+      # Strip i18n from name
+      _sp_name=$(printf '%s' "$_sp_name" | sed 's/\$\[gt\.\(.*\)\]/\1/')
+
+      _sp_output="${_sp_output}NSCDE_SUBPANEL_${_sp_idx}_NAME=${_sp_name}
+NSCDE_SUBPANEL_${_sp_idx}_WIDTH=${_sp_width}
+NSCDE_SUBPANEL_${_sp_idx}_ENABLED=${_sp_enabled}
+NSCDE_SUBPANEL_${_sp_idx}_ENTRY_COUNT=${_sp_entry_count}
+${_sp_entry_output}"
+
+      if [ "$_sp_enabled" = "1" ] && [ "$_sp_entry_count" -gt 0 ]; then
+         _sp_total=$((_sp_total + 1))
+      fi
+   done
+
+   printf 'NSCDE_SUBPANEL_COUNT=%s\n%s' "$_sp_total" "$_sp_output" \
+      > "$NSCDE_SUBPANEL_FILE"
+}
+
+##############################################################################
+# Output enumeration
+##############################################################################
+
+# nscde_output_list
+#
+# Prints one output name per line by parsing wlr-randr output.
+# Returns 1 and prints nothing when wlr-randr is unavailable or the
+# compositor does not support output management.
+function nscde_output_list
+{
+   _ol_bin=$(whence -p wlr-randr)
+   if [ -z "$_ol_bin" ]; then
+      return 1
+   fi
+   "$_ol_bin" 2>/dev/null | while IFS= read -r _ol_line
+   do
+      case "$_ol_line" in
+         " "*|"	"*)
+            # indented line: property, skip
+            ;;
+         *)
+            # non-indented line: output name (first word)
+            _ol_name=${_ol_line%% *}
+            if [ -n "$_ol_name" ]; then
+               printf '%s\n' "$_ol_name"
+            fi
+            ;;
+      esac
+   done
+}
+
+# nscde_output_geometry OUTPUT_NAME
+#
+# Prints WIDTHxHEIGHT for the given output by parsing wlr-randr.
+# Returns 1 if the output is not found or wlr-randr is unavailable.
+function nscde_output_geometry
+{
+   _og_target=$1
+   _og_bin=$(whence -p wlr-randr)
+   if [ -z "$_og_bin" ]; then
+      return 1
+   fi
+   _og_found=0
+   "$_og_bin" 2>/dev/null | while IFS= read -r _og_line
+   do
+      case "$_og_line" in
+         "$_og_target "*)
+            _og_found=1
+            ;;
+         " "*|"	"*)
+            if [ "$_og_found" = "1" ]; then
+               case "$_og_line" in
+                  *"px, position"*)
+                     # e.g. "    1920x1080 px, position 0,0"
+                     _og_geo=${_og_line%%px,*}
+                     _og_geo=$(printf '%s' "$_og_geo" | sed 's/^[[:space:]]*//')
+                     printf '%s' "$_og_geo"
+                     return 0
+                     ;;
+               esac
+            fi
+            ;;
+         *)
+            # new output section
+            _og_found=0
+            ;;
+      esac
+   done
+   return 1
+}
+
+# nscde_output_scale OUTPUT_NAME
+#
+# Prints the scale factor for the given output by parsing wlr-randr.
+# Prints 1 if scale information is not found.
+function nscde_output_scale
+{
+   _os_target=$1
+   _os_bin=$(whence -p wlr-randr)
+   if [ -z "$_os_bin" ]; then
+      echo "1"
+      return
+   fi
+   _os_found=0
+   _os_scale="1"
+   "$_os_bin" 2>/dev/null | while IFS= read -r _os_line
+   do
+      case "$_os_line" in
+         "$_os_target "*)
+            _os_found=1
+            ;;
+         " "*|"	"*)
+            if [ "$_os_found" = "1" ]; then
+               case "$_os_line" in
+                  *"x"*,*)
+                     # scale line like "    2x, ..."
+                     _os_candidate=${_os_line%%,*}
+                     _os_candidate=$(printf '%s' "$_os_candidate" | sed 's/^[[:space:]]*//')
+                     case "$_os_candidate" in
+                        [0-9]*x*)
+                           _os_scale=${_os_candidate%x*}
+                           printf '%s' "$_os_scale"
+                           return 0
+                           ;;
+                     esac
+                     ;;
+               esac
+            fi
+            ;;
+         *)
+            _os_found=0
+            ;;
+      esac
+   done
+   printf '%s' "$_os_scale"
+}
+
+##############################################################################
+# Backdrop state
+##############################################################################
+
+# nscde_backdrop_publish IMAGE COLOR
+#
+# Records the current backdrop image path and palette color in session state.
+# Writes the legacy single-entry state for backward compatibility.
+function nscde_backdrop_publish
+{
+   _bp_image=$1
+   _bp_color=$2
+   nscde_state_write "$NSCDE_STATE_FILE" "NSCDE_BACKDROP_IMAGE" "$_bp_image"
+   nscde_state_write "$NSCDE_STATE_FILE" "NSCDE_BACKDROP_COLOR" "$_bp_color"
+}
+
+# NSCDE_BACKDROP_OUTPUT_FILE is set in nscde_backend_init to
+# ${NSCDE_STATE_DIR}/backdrops.env
+
+# nscde_backdrop_publish_output OUTPUT IMAGE MODE COLOR
+#
+# Records per-output backdrop state. Writes entries to backdrops.env
+# for mixed-output setups.
+function nscde_backdrop_publish_output
+{
+   _bpo_output=$1
+   _bpo_image=$2
+   _bpo_mode=$3
+   _bpo_color=$4
+   nscde_state_ensure_dir
+   nscde_state_write "$NSCDE_BACKDROP_OUTPUT_FILE" \
+      "NSCDE_BACKDROP_OUTPUT_${_bpo_output}_IMAGE" "$_bpo_image"
+   nscde_state_write "$NSCDE_BACKDROP_OUTPUT_FILE" \
+      "NSCDE_BACKDROP_OUTPUT_${_bpo_output}_MODE" "$_bpo_mode"
+   nscde_state_write "$NSCDE_BACKDROP_OUTPUT_FILE" \
+      "NSCDE_BACKDROP_OUTPUT_${_bpo_output}_COLOR" "$_bpo_color"
+}
+
+# nscde_backdrop_publish_outputs_count COUNT
+#
+# Records the number of outputs with active backdrops.
+function nscde_backdrop_publish_outputs_count
+{
+   _bpc_count=$1
+   nscde_state_ensure_dir
+   nscde_state_write "$NSCDE_BACKDROP_OUTPUT_FILE" \
+      "NSCDE_BACKDROP_OUTPUT_COUNT" "$_bpc_count"
+}
+
+# nscde_backdrop_read_output OUTPUT KEY
+#
+# Reads a per-output backdrop key (IMAGE, MODE, or COLOR).
+# Prints the value; returns 1 if not found.
+function nscde_backdrop_read_output
+{
+   _bro_output=$1
+   _bro_key=$2
+   nscde_state_read "$NSCDE_BACKDROP_OUTPUT_FILE" \
+      "NSCDE_BACKDROP_OUTPUT_${_bro_output}_${_bro_key}"
+}
+
+##############################################################################
+# Pager state
+##############################################################################
+
+# nscde_pager_publish
+#
+# Writes the pager.env state file consumed by workspace switcher UIs.
+# Provides workspace list, current workspace, count and index.
+function nscde_pager_publish
+{
+   nscde_state_ensure_dir
+   _pp_workspaces="$NSCDE_WORKSPACES"
+   _pp_current="$NSCDE_CURRENT_WORKSPACE"
+   _pp_count=$(nscde_workspace_count)
+   _pp_index=$(nscde_workspace_index "$_pp_current")
+
+   nscde_state_write_file "${NSCDE_STATE_DIR}/pager.env" \
+      "NSCDE_PAGER_WORKSPACES=$_pp_workspaces" \
+      "NSCDE_PAGER_CURRENT=$_pp_current" \
+      "NSCDE_PAGER_COUNT=$_pp_count" \
+      "NSCDE_PAGER_INDEX=$_pp_index" \
+      "NSCDE_PAGER_COMMAND_FIFO=$NSCDE_PAGER_COMMAND_FIFO"
+}
+
+##############################################################################
+# Workspace helpers
+##############################################################################
+
+# nscde_workspace_list
+#
+# Prints one workspace name per line from NSCDE_WORKSPACES.
+function nscde_workspace_list
+{
+   old_ifs=$IFS
+   IFS=,
+   set -- $NSCDE_WORKSPACES
+   IFS=$old_ifs
+
+   for _ws_name in "$@"
+   do
+      _ws_name=$(printf '%s' "$_ws_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ -n "$_ws_name" ]; then
+         printf '%s\n' "$_ws_name"
+      fi
+   done
+}
+
+# nscde_workspace_count
+#
+# Prints the number of workspaces.
+function nscde_workspace_count
+{
+   nscde_workspace_list | wc -l | tr -d ' '
+}
+
+# nscde_workspace_exists NAME
+#
+# Returns 0 if the named workspace exists in the workspace list.
+function nscde_workspace_exists
+{
+   _we_target=$1
+   old_ifs=$IFS
+   IFS=,
+   set -- $NSCDE_WORKSPACES
+   IFS=$old_ifs
+   for _we_name in "$@"
+   do
+      _we_name=$(printf '%s' "$_we_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      if [ "$_we_name" = "$_we_target" ]; then
+         return 0
+      fi
+   done
+   return 1
+}
+
+# nscde_workspace_index NAME
+#
+# Prints the 1-based index of the named workspace, or nothing if not found.
+function nscde_workspace_index
+{
+   _wi_target=$1
+   _wi_idx=0
+   old_ifs=$IFS
+   IFS=,
+   set -- $NSCDE_WORKSPACES
+   IFS=$old_ifs
+   for _wi_name in "$@"
+   do
+      _wi_name=$(printf '%s' "$_wi_name" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+      _wi_idx=$((_wi_idx + 1))
+      if [ "$_wi_name" = "$_wi_target" ]; then
+         echo "$_wi_idx"
+         return 0
+      fi
+   done
+   return 1
+}
+
+##############################################################################
+# Command FIFO management
+##############################################################################
+
+# nscde_fifo_ensure
+#
+# Creates the command FIFO if it does not already exist.
+function nscde_fifo_ensure
+{
+   if [ -p "$NSCDE_COMMAND_FIFO" ]; then
+      return
+   fi
+   rm -f "$NSCDE_COMMAND_FIFO"
+   mkfifo "$NSCDE_COMMAND_FIFO" || return 1
+}
+
+# nscde_fifo_ensure_path PATH
+#
+# Creates a FIFO at PATH if it does not already exist.
+function nscde_fifo_ensure_path
+{
+   _fep_path=$1
+   if [ -z "$_fep_path" ]; then
+      return 1
+   fi
+   if [ -p "$_fep_path" ]; then
+      return 0
+   fi
+   rm -f "$_fep_path"
+   mkfifo "$_fep_path" || return 1
+}
+
+##############################################################################
+# Backend capability model
+#
+# Each backend should call nscde_cap_set to declare its capabilities.
+# Shell tools can query capabilities with nscde_cap_has.
+##############################################################################
+
+# nscde_cap_set FLAG
+#
+# Declares that the current backend supports the given capability flag.
+function nscde_cap_set
+{
+   _cs_flag=$1
+   _cs_capfile="${NSCDE_STATE_DIR}/capabilities"
+   if ! grep -q "^${_cs_flag}=1$" "$_cs_capfile" 2>/dev/null; then
+      printf '%s=1\n' "$_cs_flag" >> "$_cs_capfile"
+   fi
+}
+
+# nscde_cap_has FLAG
+#
+# Returns 0 if the current backend declares the given capability.
+function nscde_cap_has
+{
+   _ch_flag=$1
+   _ch_capfile="${NSCDE_STATE_DIR}/capabilities"
+   grep -q "^${_ch_flag}=1$" "$_ch_capfile" 2>/dev/null
+}
+
+# nscde_caps_init
+#
+# Clears the capability file for a fresh backend session.
+function nscde_caps_init
+{
+   : > "${NSCDE_STATE_DIR}/capabilities"
+}
+
+##############################################################################
+# Labwc backend capabilities
+#
+# Sets the capability flags that the labwc backend provides.
+##############################################################################
+
+function nscde_caps_labwc
+{
+   nscde_caps_init
+   nscde_cap_set supports-server-side-decoration-control
+   nscde_cap_set supports-live-theme-reload
+   nscde_cap_set supports-workspace-switch
+   nscde_cap_set supports-layer-shell
+   nscde_cap_set supports-foreign-toplevel
+}
+
+##############################################################################
+# FVWM backend capabilities
+#
+# Sets the capability flags that the FVWM backend provides.
+##############################################################################
+
+function nscde_caps_fvwm
+{
+   nscde_caps_init
+   nscde_cap_set supports-pages
+   nscde_cap_set supports-server-side-decoration-control
+   nscde_cap_set supports-live-theme-reload
+   nscde_cap_set supports-window-icons-as-separate-objects
+   nscde_cap_set supports-fvwm-commands
+}
+
+##############################################################################
+# Task list state
+##############################################################################
+
+# nscde_taskd_publish
+#
+# Writes the taskd.env state file consumed by task list UIs.
+# Provides window count, focused window, and per-window entries.
+function nscde_taskd_publish
+{
+   nscde_state_ensure_dir
+
+   _tp_count=0
+   _tp_focused=""
+   _tp_lines=""
+
+   if [ -f "$NSCDE_WINDOWS_FILE" ]; then
+      _tp_focused=$(nscde_state_read "$NSCDE_WINDOWS_FILE" "NSCDE_FOCUSED_WINDOW" 2>/dev/null)
+
+      while IFS= read -r _tp_line
+      do
+         case "$_tp_line" in
+            window_*_title=*)
+               _tp_key="${_tp_line%%=*}"
+               _tp_val="${_tp_line#*=}"
+               _tp_id="${_tp_key#window_}"
+               _tp_id="${_tp_id%_title}"
+               _tp_count=$((_tp_count + 1))
+               _tp_lines="${_tp_lines}task_${_tp_id}_title=${_tp_val}
+"
+               ;;
+            window_*_workspace=*)
+               _tp_key="${_tp_line%%=*}"
+               _tp_val="${_tp_line#*=}"
+               _tp_id="${_tp_key#window_}"
+               _tp_id="${_tp_id%_workspace}"
+               _tp_lines="${_tp_lines}task_${_tp_id}_workspace=${_tp_val}
+"
+               ;;
+         esac
+      done <<EOF
+$(grep -E '^window_.+_(title|workspace)=' "$NSCDE_WINDOWS_FILE" 2>/dev/null)
+EOF
+   fi
+
+   printf '%s\n' \
+      "NSCDE_TASK_COUNT=$_tp_count" \
+      "NSCDE_TASK_FOCUSED=$_tp_focused" \
+      "NSCDE_TASK_COMMAND_FIFO=$NSCDE_COMMAND_FIFO" \
+      > "${NSCDE_STATE_DIR}/taskd.env"
+
+   if [ -n "$_tp_lines" ]; then
+      printf '%s' "$_tp_lines" >> "${NSCDE_STATE_DIR}/taskd.env"
+   fi
+}
+
+##############################################################################
+# Workspace state publishing
+##############################################################################
+
+# nscde_workspaces_publish
+#
+# Writes the workspaces.env state file with current workspace metadata.
+function nscde_workspaces_publish
+{
+   nscde_state_ensure_dir
+   _wp_count=$(nscde_workspace_count)
+   nscde_state_write_file "$NSCDE_WORKSPACES_FILE" \
+      "NSCDE_WORKSPACES=$NSCDE_WORKSPACES" \
+      "NSCDE_WORKSPACE_COUNT=$_wp_count" \
+      "NSCDE_CURRENT_WORKSPACE=$NSCDE_CURRENT_WORKSPACE" \
+      "NSCDE_PAGER_COMMAND_FIFO=$NSCDE_PAGER_COMMAND_FIFO"
+}
+
+##############################################################################
+# Window state publishing
+##############################################################################
+
+# nscde_windows_init
+#
+# Initializes an empty windows.env state file.
+function nscde_windows_init
+{
+   nscde_state_ensure_dir
+   nscde_state_write_file "$NSCDE_WINDOWS_FILE" \
+      "NSCDE_WINDOW_COUNT=0" \
+      "NSCDE_FOCUSED_WINDOW="
+}
+
+# nscde_window_register ID TITLE WORKSPACE
+#
+# Adds a window entry to the windows.env state file.
+function nscde_window_register
+{
+   _wr_id=$1
+   _wr_title=$2
+   _wr_workspace=$3
+
+   nscde_state_write "$NSCDE_WINDOWS_FILE" "window_${_wr_id}_title" "$_wr_title"
+   nscde_state_write "$NSCDE_WINDOWS_FILE" "window_${_wr_id}_workspace" "$_wr_workspace"
+   nscde_state_write "$NSCDE_WINDOWS_FILE" "window_${_wr_id}_focused" "0"
+}
+
+# nscde_window_unregister ID
+#
+# Removes a window entry from the windows.env state file.
+function nscde_window_unregister
+{
+   _wu_id=$1
+
+   if [ -f "$NSCDE_WINDOWS_FILE" ]; then
+      sed -i "/^window_${_wu_id}_/d" "$NSCDE_WINDOWS_FILE"
+   fi
+}
+
+# nscde_window_focus ID
+#
+# Updates the focused window in the windows.env state file.
+function nscde_window_focus
+{
+   _wf_id=$1
+
+   nscde_state_write "$NSCDE_WINDOWS_FILE" "NSCDE_FOCUSED_WINDOW" "$_wf_id"
+}
+
+##############################################################################
+# Palette parsing
+#
+# CDE .dp palette files contain 8 colors in 16-bit hex format:
+# #RRRRGGGGBBBB (one color per line).
+# These functions convert to 8-bit hex (#RRGGBB) for labwc themerc use.
+##############################################################################
+
+# nscde_palette_parse FILE
+#
+# Reads a .dp palette file and prints 8 lines of #RRGGBB colors.
+# Converts from 16-bit to 8-bit by taking the high byte of each channel.
+function nscde_palette_parse
+{
+   _pp_file=$1
+
+   if [ ! -r "$_pp_file" ]; then
+      echo "Error: cannot read palette file $_pp_file" >&2
+      return 1
+   fi
+
+   while IFS= read -r _pp_line
+   do
+      # Strip leading # if present
+      _pp_hex="${_pp_line#\#}"
+      # Extract 16-bit R, G, B channels (4 hex chars each)
+      _pp_rr16="${_pp_hex:0:4}"
+      _pp_gg16="${_pp_hex:4:4}"
+      _pp_bb16="${_pp_hex:8:4}"
+      # Convert to 8-bit by taking high byte (first 2 hex chars)
+      _pp_rr="${_pp_rr16:0:2}"
+      _pp_gg="${_pp_gg16:0:2}"
+      _pp_bb="${_pp_bb16:0:2}"
+      printf '#%s%s%s\n' "$_pp_rr" "$_pp_gg" "$_pp_bb"
+   done < "$_pp_file"
+}
+
+# nscde_palette_color INDEX FILE
+#
+# Prints the 8-bit hex color at the given 1-based index from a .dp file.
+function nscde_palette_color
+{
+   _pc_index=$1
+   _pc_file=$2
+
+   nscde_palette_parse "$_pc_file" | sed -n "${_pc_index}p"
+}
+
+##############################################################################
+# Backend adapter functions
+#
+# These functions provide the backend-agnostic interface that the NsCDE
+# session launchers use. Each backend provides its own implementation
+# through dispatch based on NSCDE_BACKEND.
+##############################################################################
+
+# nscde_backend_find_binary
+#
+# Locates the compositor or window manager binary for the current backend.
+# Sets NSCDE_BACKEND_BIN on success. Returns 1 if not found.
+function nscde_backend_find_binary
+{
+   case "$NSCDE_BACKEND" in
+      labwc)
+         if [ -z "$LABWC_BIN" ]; then
+            LABWC_BIN=$(whence -p labwc)
+         fi
+         if [ -z "$LABWC_BIN" ]; then
+            echo "Error: cannot detect labwc in PATH and LABWC_BIN is not set." >&2
+            return 1
+         fi
+         export NSCDE_BACKEND_BIN="$LABWC_BIN"
+         ;;
+      fvwm)
+         if [ -z "$FVWM_BIN" ]; then
+            for _fb_name in fvwm3 fvwm2 fvwm
+            do
+               FVWM_BIN=$(whence -p $_fb_name)
+               if [ $? -eq 0 ]; then
+                  break
+               fi
+            done
+         fi
+         if [ -z "$FVWM_BIN" ]; then
+            echo "Error: cannot detect fvwm, fvwm2 nor fvwm3 in PATH and" >&2
+            echo "environment variable FVWM_BIN is not set. Exiting." >&2
+            return 1
+         fi
+         export NSCDE_BACKEND_BIN="$FVWM_BIN"
+         ;;
+      *)
+         echo "Error: unknown backend '$NSCDE_BACKEND'." >&2
+         return 1
+         ;;
+   esac
+}
+
+# nscde_backend_prepare_x11
+#
+# Sets up the X11 environment for backends that need it (fvwm).
+# Detects DPI, processes Xdefaults, loads Xset.conf.
+function nscde_backend_prepare_x11
+{
+   # Find out which DPI we are using.
+   _x11_dpi_info=$(LC_ALL=C xdpyinfo 2>/dev/null | egrep 'resolution:.*dots per inch' | awk '{ print $2 }')
+   echo "${_x11_dpi_info}" | egrep -q "^[[:digit:]]+x[[:digit:]]+$"
+   if [ $? -eq 0 ]; then
+      export DPI="${_x11_dpi_info##*x}"
+   else
+      echo "Warning: DPI \"$DPI\" is not recognized as X DPI specification. Setting DPI to 96" >&2
+      export DPI=96
+   fi
+
+   # Handle our X defaults if it exists.
+   if [ -r "${NSCDE_FVWM_USERDIR}/Xdefaults" ]; then
+      cd "$HOME"
+      whence -qp xrdb cpp
+      if [ $? -eq 0 ]; then
+         xrdb -remove && xrdb -cpp /usr/bin/cpp < "${NSCDE_FVWM_USERDIR}/Xdefaults"
+      else
+         echo "Warning: cannot find xrdb or cpp in ${PATH}, ${NSCDE_FVWM_USERDIR}/Xdefaults will not be processed" >&2
+      fi
+   else
+      echo "Warning: cannot read ${NSCDE_FVWM_USERDIR}/Xdefaults file" >&2
+   fi
+
+   # Handle our app-defaults dir if it exists.
+   if [ -d "${NSCDE_FVWM_USERDIR}/app-defaults" ]; then
+      export XAPPLRESDIR="${NSCDE_FVWM_USERDIR}/app-defaults"
+   else
+      echo "Warning: cannot find ${NSCDE_FVWM_USERDIR}/app-defaults directory" >&2
+   fi
+
+   # Set xset(1), setxkbmap(1), xgamma(1), xmodmap(1) and such things from
+   # Xset.conf if it exists.
+   if [ -r "${NSCDE_FVWM_USERDIR}/Xset.conf" ]; then
+      . "${NSCDE_FVWM_USERDIR}/Xset.conf"
+   else
+      echo "Notice: ${NSCDE_FVWM_USERDIR}/Xset.conf does not exist"
+   fi
+}
+
+# nscde_backend_prepare_path
+#
+# Ensures the NsCDE binary directory is in PATH.
+function nscde_backend_prepare_path
+{
+   echo "$PATH" | egrep -q "${NSCDE_ROOT}/bin"
+   if [ $? -ne 0 ]; then
+      export PATH="${NSCDE_ROOT}/bin:${PATH}"
+   fi
+}
+
+# nscde_backend_run_pre_start
+#
+# Runs the user's pre_start.sh hook if it exists.
+function nscde_backend_run_pre_start
+{
+   if [ -x "${NSCDE_FVWM_USERDIR}/libexec/pre_start.sh" ]; then
+      . "${NSCDE_FVWM_USERDIR}/libexec/pre_start.sh"
+   fi
+}
+
+# nscde_backend_reload
+#
+# Triggers a backend reconfigure/reload.
+function nscde_backend_reload
+{
+   case "$NSCDE_BACKEND" in
+      labwc)
+         # labwc reconfigures via SIGHUP
+         pkill -HUP -x labwc 2>/dev/null || true
+         ;;
+      fvwm)
+         # FVWM reconfigures via FvwmCommand or SIGUSR1
+         if [ -n "$FVWM_BIN" ]; then
+            pkill -USR1 -x fvwm 2>/dev/null || true
+         fi
+         ;;
+   esac
+}

@@ -1,0 +1,255 @@
+#!@KSH@
+
+#
+# NsCDE pixel icon scale-tier generator.
+# Converts XPM/PM icons to PNG and generates exact-size raster tiers
+# (1x, 2x, 3x, 4x) using nearest-neighbor scaling for crisp HiDPI rendering.
+#
+# Requires: ImageMagick convert (@CONVERT@)
+#
+# Usage:
+#   nscde_asset_tiergen [-s SRCDIR] [-o OUTDIR] [-t TIERS] [-f FAMILY] [-a]
+#
+# Asset tiers follow the convention:
+#   1x = original size (e.g. 48x48)
+#   2x = double (e.g. 96x96)
+#   3x = triple (e.g. 144x144)
+#   4x = quadruple (e.g. 192x192)
+#
+
+CONVERT="@CONVERT@"
+
+if [ -z "$HOME" ]; then
+   echo "Error: HOME not set." >&2
+   exit 2
+fi
+
+# Set minimal backend context if not already provided
+export NSCDE_BACKEND=${NSCDE_BACKEND:-labwc}
+export NSCDE_ROOT=${NSCDE_ROOT:-@prefix@}
+
+# Source the shared backend library
+. "@NSCDE_TOOLSDIR@/nscde_backend.shlib"
+
+# Initialize backend environment for XDG paths
+nscde_backend_init || exit 2
+
+# Defaults
+SRCDIR="${NSCDE_DATADIR}/icons/NsCDE"
+OUTDIR="${NSCDE_FVWM_USERDIR}/icons/tiers"
+TIERS="1x 2x"
+FAMILY=""
+PROCESS_ALL=0
+
+usage() {
+   echo "Usage: nscde_asset_tiergen [-s SRCDIR] [-o OUTDIR] [-t TIERS] [-f FAMILY] [-a]"
+   echo ""
+   echo "Generate exact-size raster tiers for NsCDE pixel icons."
+   echo ""
+   echo "Options:"
+   echo "  -s SRCDIR   Source icon directory (default: \$NSCDE_DATADIR/icons/NsCDE)"
+   echo "  -o OUTDIR   Output directory (default: \$NSCDE_FVWM_USERDIR/icons/tiers)"
+   echo "  -t TIERS    Space-separated tier list (default: \"1x 2x\")"
+   echo "              Supported: 1x 2x 3x 4x"
+   echo "  -f FAMILY   Icon family filter: fp, dt, wsm, stylemgr, arrow, dialog"
+   echo "  -a          Process all icon families"
+   echo "  -h          Show this help"
+   echo ""
+   echo "Tiers are generated using nearest-neighbor scaling to preserve"
+   echo "pixel-art crispness on HiDPI displays."
+   exit 0
+}
+
+# Determine scale factor from tier name
+tier_scale() {
+   case "$1" in
+      1x) echo 1 ;;
+      2x) echo 2 ;;
+      3x) echo 3 ;;
+      4x) echo 4 ;;
+      *)  echo 0 ;;
+   esac
+}
+
+# Convert a single XPM/PM file to PNG at a given scale
+convert_icon() {
+   _src="$1"
+   _dst="$2"
+   _scale="$3"
+   _base=$(basename "$_src")
+
+   if [ ! -r "$_src" ]; then
+      echo "Warning: cannot read $_src" >&2
+      return 1
+   fi
+
+   if [ "$_scale" -eq 1 ]; then
+      "$CONVERT" "$_src" -type Palette PNG32:"$_dst" 2>/dev/null
+   else
+      "$CONVERT" "$_src" -type Palette \
+         -resize "$((_scale * 100))%" -interpolate Nearest -filter point \
+         PNG32:"$_dst" 2>/dev/null
+   fi
+
+   if [ $? -ne 0 ]; then
+      echo "Warning: failed to convert $_src" >&2
+      return 1
+   fi
+   return 0
+}
+
+# Process icons matching a pattern
+process_icons() {
+   _pattern="$1"
+   _tier="$2"
+   _scale="$3"
+   _tier_out="$OUTDIR/$_tier"
+   _count=0
+   _errors=0
+
+   mkdir -p "$_tier_out"
+
+   for _src in "$SRCDIR"/$_pattern; do
+      [ -r "$_src" ] || continue
+      _base=$(basename "$_src")
+      _stem="${_base%.*}"
+      _dst="$_tier_out/${_stem}.png"
+
+      # Skip if destination exists and is newer than source
+      if [ -f "$_dst" ] && [ "$_dst" -nt "$_src" ]; then
+         continue
+      fi
+
+      if convert_icon "$_src" "$_dst" "$_scale"; then
+         _count=$((_count + 1))
+      else
+         _errors=$((_errors + 1))
+      fi
+   done
+
+   echo "  $_tier: $_count icons generated ($_errors errors)"
+}
+
+# Process a specific family
+process_family() {
+   _fam="$1"
+   _tier="$2"
+   _scale="$3"
+
+   case "$_fam" in
+      fp)
+         process_icons "Fp*.pm" "$_tier" "$_scale"
+         process_icons "Fp*.xpm" "$_tier" "$_scale"
+         ;;
+      dt)
+         process_icons "Dt*.pm" "$_tier" "$_scale"
+         ;;
+      wsm)
+         process_icons "Wsm_*.xpm" "$_tier" "$_scale"
+         ;;
+      stylemgr)
+         process_icons "StyleMgr-*.xpm" "$_tier" "$_scale"
+         ;;
+      arrow)
+         process_icons "Arrow*.xpm" "$_tier" "$_scale"
+         ;;
+      dialog)
+         process_icons "Error.xpm" "$_tier" "$_scale"
+         process_icons "Warning.xpm" "$_tier" "$_scale"
+         process_icons "Question.xpm" "$_tier" "$_scale"
+         process_icons "Info.xpm" "$_tier" "$_scale"
+         ;;
+      *)
+         echo "Unknown family: $_fam" >&2
+         return 1
+         ;;
+   esac
+}
+
+# Parse arguments
+while getopts "s:t:f:o:ah" opt; do
+   case "$opt" in
+      s) SRCDIR="$OPTARG" ;;
+      o) OUTDIR="$OPTARG" ;;
+      t) TIERS="$OPTARG" ;;
+      f) FAMILY="$OPTARG" ;;
+      a) PROCESS_ALL=1 ;;
+      h) usage ;;
+      *) usage ;;
+   esac
+done
+
+# Validate convert command
+if ! command -v "$CONVERT" >/dev/null 2>&1; then
+   echo "Error: ImageMagick convert not found at $CONVERT" >&2
+   echo "Install ImageMagick to use nscde_asset_tiergen." >&2
+   exit 1
+fi
+
+# Validate source directory
+if [ ! -d "$SRCDIR" ]; then
+   echo "Error: source directory not found: $SRCDIR" >&2
+   exit 1
+fi
+
+# Write tier metadata
+write_metadata() {
+   _meta="$OUTDIR/tiers.meta"
+   cat > "$_meta" <<EOF
+# NsCDE asset tier metadata
+# Generated by nscde_asset_tiergen
+# Source: $SRCDIR
+# Tiers: $TIERS
+# Family filter: ${FAMILY:-all}
+#
+# Each tier directory contains PNG icons scaled from canonical masters
+# using nearest-neighbor interpolation for pixel-art crispness.
+#
+# Tier scale factors:
+#   1x = original size (nearest-neighbor source)
+#   2x = 2x integer scale
+#   3x = 3x integer scale
+#   4x = 4x integer scale
+#
+# Select the tier closest to the current output scale factor.
+# For fractional scales (e.g. 1.5x), prefer the next higher integer tier
+# and let the compositor handle final scaling.
+EOF
+}
+
+# Main processing
+echo "NsCDE asset tier generator"
+echo "Source: $SRCDIR"
+echo "Output: $OUTDIR"
+echo "Tiers: $TIERS"
+echo ""
+
+mkdir -p "$OUTDIR"
+write_metadata
+
+for tier in $TIERS; do
+   scale=$(tier_scale "$tier")
+   if [ "$scale" -eq 0 ]; then
+      echo "Warning: unknown tier '$tier', skipping" >&2
+      continue
+   fi
+
+   echo "Generating $tier (${scale}x) tier:"
+
+   if [ -n "$FAMILY" ]; then
+      process_family "$FAMILY" "$tier" "$scale"
+   elif [ "$PROCESS_ALL" -eq 1 ]; then
+      process_family fp "$tier" "$scale"
+      process_family dt "$tier" "$scale"
+      process_family wsm "$tier" "$scale"
+      process_family stylemgr "$tier" "$scale"
+      process_family arrow "$tier" "$scale"
+      process_family dialog "$tier" "$scale"
+   else
+      # Default: process Front Panel icons (most immediately useful)
+      process_family fp "$tier" "$scale"
+   fi
+done
+
+echo ""
+echo "Tier generation complete. Output: $OUTDIR"

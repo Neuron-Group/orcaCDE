@@ -1,0 +1,25 @@
+# Extracted asset categories for the standalone Wayland repo scaffold.
+#
+# Source of truth for these inputs currently remains ../NsCDE/.
+# The standalone repo copies only assets that the extracted Wayland path still
+# consumes today; this is intentionally narrower than mirroring the full legacy
+# tree.
+
+assets/palettes/ <= NsCDE/data/palettes/*.dp
+assets/fontsets/ <= NsCDE/data/fontsets/*.fontset
+assets/backdrops/ <= NsCDE/data/backdrops/*.pm
+assets/photos/ <= NsCDE/data/photos/*.png
+assets/fvwm/Font-*.fvwmconf <= NsCDE/data/fvwm/Font-*.fvwmconf
+assets/fvwm/Keybindings.* <= NsCDE/data/fvwm/Keybindings.*
+assets/icons/NsCDE/ <= NsCDE/data/icons/NsCDE/*
+assets/defaults/AppMenus.conf <= NsCDE/data/defaults/AppMenus.conf
+assets/defaults/FrontPanel.actions <= NsCDE/data/defaults/FrontPanel.actions
+assets/defaults/Subpanels.actions <= NsCDE/data/defaults/Subpanels.actions
+assets/defaults/WSM.conf <= NsCDE/data/defaults/WSM.conf
+assets/defaults/Keymenu-cua.actions <= NsCDE/data/defaults/Keymenu-cua.actions
+assets/defaults/Keymenu-nscde1x.actions <= NsCDE/data/defaults/Keymenu-nscde1x.actions
+xdg/applications/ <= NsCDE/xdg/applications/*
+xdg/desktop-directories/ <= NsCDE/xdg/desktop-directories/*
+xdg/icons/NsCDE/ <= NsCDE/xdg/icons/NsCDE/*
+xdg/menus/nscde-applications.menu <= NsCDE/xdg/menus/nscde-applications.menu
+xdg/wayland-sessions/nscde-labwc.desktop <= NsCDE/xdg/wayland-sessions/nscde-labwc.desktop

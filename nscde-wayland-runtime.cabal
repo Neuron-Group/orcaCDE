@@ -1,0 +1,19 @@
+cabal-version:      2.4
+name:               nscde-wayland-runtime
+version:            0.1.0.0
+build-type:         Simple
+
+executable nscde-runtime
+  main-is:             nscde-runtime.hs
+  hs-source-dirs:      haskell/app haskell/src
+  other-modules:
+      NsCDE.Runtime.EnvFile
+    , NsCDE.Runtime.LabwcMenu
+    , NsCDE.Runtime.LabwcSession
+    , NsCDE.Runtime.PanelLayout
+  build-depends:
+      base >=4.14 && <5
+    , directory
+    , filepath
+  default-language:    Haskell2010
+  ghc-options:         -Wall

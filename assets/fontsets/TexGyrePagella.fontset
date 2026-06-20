@@ -1,0 +1,15 @@
+font.variable.normal.small=xft:TeX Gyre Pagella:Medium:Regular:size=10
+font.variable.bold.small=xft:TeX Gyre Pagella:Medium:Bold:size=10
+font.variable.italic.small=xft:TeX Gyre Pagella:Medium:Italic:size=10
+font.monospaced.normal.small=xft:Monospace:Medium:Regular:size=10
+font.monospaced.bold.small=xft:Monospace:Medium:Bold:size=10
+font.variable.normal.medium=xft:TeX Gyre Pagella:Medium:Regular:size=12
+font.variable.bold.medium=xft:TeX Gyre Pagella:Medium:Bold:size=12
+font.variable.italic.medium=xft:TeX Gyre Pagella:Medium:Italic:size=12
+font.monospaced.normal.medium=xft:Monospace:Medium:Regular:size=11
+font.monospaced.bold.medium=xft:Monospace:Medium:Bold:size=11
+font.variable.normal.large=xft:TeX Gyre Pagella:Medium:Regular:size=15
+font.variable.bold.large=xft:TeX Gyre Pagella:Medium:Bold:size=15
+font.variable.italic.large=xft:TeX Gyre Pagella:Medium:Italic:size=15
+font.monospaced.normal.large=xft:Monospace:Medium:Regular:size=13
+font.monospaced.bold.large=xft:Monospace:Medium:Bold:size=13

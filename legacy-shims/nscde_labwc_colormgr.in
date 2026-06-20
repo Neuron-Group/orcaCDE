@@ -1,0 +1,623 @@
+#!@PYTHON@
+
+import glob
+import os
+import subprocess
+import sys
+from PyQt5.QtCore import Qt
+from PyQt5.QtGui import QColor, QIcon, QPixmap
+from PyQt5.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QFrame,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+PALETTE_COLOR_NAMES = [
+    "Background",
+    "Foreground",
+    "Top Shadow",
+    "Bottom Shadow",
+    "Select",
+    "Accent",
+    "Secondary Bg",
+    "Secondary Fg",
+]
+
+
+def debug_log_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "style-debug.log")
+
+
+def append_debug_log(title, text):
+    path = debug_log_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write("== {} ==\n{}\n\n".format(title, text))
+
+
+def env_path():
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1", "panel.env")
+
+
+def parse_env_file(path):
+    data = {}
+    if not os.path.exists(path):
+        return data
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            data[key] = value
+    return data
+
+
+def read_palette(state):
+    palette = []
+    for key in PALETTE_KEYS:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+
+
+def nscde_datadir():
+    return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
+
+
+def nscde_fvwm_userdir():
+    return os.environ.get(
+        "FVWM_USERDIR",
+        os.path.join(os.path.expanduser("~"), ".NsCDE"),
+    )
+
+
+def nscde_toolsdir():
+    return os.environ.get(
+        "NSCDE_TOOLSDIR",
+        os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
+    )
+
+
+def find_palettes():
+    sys_dir = os.path.join(nscde_datadir(), "palettes")
+    user_dir = os.path.join(nscde_fvwm_userdir(), "palettes")
+
+    palettes = []
+    for d in [sys_dir, user_dir]:
+        if os.path.isdir(d):
+            for path in sorted(glob.glob(os.path.join(d, "*.dp"))):
+                name = os.path.splitext(os.path.basename(path))[0]
+                palettes.append((name, path))
+    return palettes
+
+
+def parse_palette_file(path, ncolors=8):
+    colors = []
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                # .dp format: lines are either #RRRRGGGGBBBB (13 chars)
+                # or RRRRGGGGBBBB (12 chars), where each channel is 16-bit.
+                hex_str = line
+                if line.startswith("#") and len(line) == 13:
+                    hex_str = line[1:]
+                elif len(line) == 12:
+                    hex_str = line
+                else:
+                    continue
+                try:
+                    r = int(hex_str[0:4], 16) >> 8
+                    g = int(hex_str[4:8], 16) >> 8
+                    b = int(hex_str[8:12], 16) >> 8
+                    colors.append(QColor(r, g, b))
+                except ValueError:
+                    continue
+                if len(colors) >= ncolors:
+                    break
+    except OSError:
+        pass
+    while len(colors) < ncolors:
+        colors.append(QColor(128, 128, 128))
+    return colors[:ncolors]
+
+
+def build_stylesheet(pal):
+    bg = pal[0]
+    fg = pal[1]
+    hi = pal[2]
+    sh = pal[3]
+    acc = pal[5]
+    sbg = pal[6]
+    sfg = pal[7]
+
+    return """
+            QWidget#NsCDEColorMgr {{
+                background-color: {sbg};
+                color: {sfg};
+            }}
+            QFrame#mainFrame {{
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QGroupBox {{
+                background-color: {sbg};
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                border: 1px solid {sh};
+                margin-top: 12px;
+                padding-top: 10px;
+            }}
+            QGroupBox::title {{
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 4px;
+            }}
+            QListWidget {{
+                background-color: {bg};
+                color: {fg};
+                font-family: Sans;
+                font-size: 10pt;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                outline: none;
+            }}
+            QListWidget::item {{
+                padding: 2px 4px;
+            }}
+            QListWidget::item:selected {{
+                background-color: {acc};
+                color: #ffffff;
+            }}
+            QListWidget::item:hover {{
+                background-color: {hi};
+                color: {fg};
+            }}
+            QPushButton {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                font-weight: bold;
+                min-width: 80px;
+                padding: 4px 10px;
+                background-color: {sbg};
+                border-top: 2px solid {hi};
+                border-left: 2px solid {hi};
+                border-right: 2px solid {sh};
+                border-bottom: 2px solid {sh};
+            }}
+            QPushButton:pressed {{
+                background-color: {acc};
+                color: #ffffff;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            QPushButton:disabled {{
+                color: {sh};
+            }}
+            QCheckBox {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                spacing: 6px;
+            }}
+            QCheckBox::indicator {{
+                width: 14px;
+                height: 14px;
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+                background-color: {bg};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: {acc};
+            }}
+            QLabel {{
+                color: {sfg};
+                font-family: Sans;
+                font-size: 10pt;
+                background-color: transparent;
+            }}
+            QLabel#titleLabel {{
+                font-size: 12pt;
+                font-weight: bold;
+            }}
+            QLabel#palettePreview {{
+                border-top: 2px solid {sh};
+                border-left: 2px solid {sh};
+                border-right: 2px solid {hi};
+                border-bottom: 2px solid {hi};
+            }}
+            """.format(
+        bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
+    )
+
+
+class ColorSwatch(QFrame):
+    def __init__(self, color, label, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(64, 32)
+        self.set_color(color)
+        self.setToolTip(label)
+
+    def set_color(self, color):
+        self.setStyleSheet(
+            "background-color: {}; border: 1px solid #808080;".format(color.name())
+        )
+
+
+class NsCDEColorMgr(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Style Manager - Color")
+        self.setObjectName("NsCDEColorMgr")
+        self.setMinimumSize(480, 500)
+
+        self.current_palette = list(DEFAULT_PALETTE)
+        self.palettes = find_palettes()
+        self.selected_palette_path = None
+        self.ncolors = 8
+
+        self._build_ui()
+        self._apply_stylesheet()
+        self._load_palette_list()
+        self._detect_current_palette()
+
+    def _build_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        main_layout.setSpacing(8)
+
+        frame = QFrame()
+        frame.setObjectName("mainFrame")
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(8, 8, 8, 8)
+        frame_layout.setSpacing(8)
+
+        title = QLabel("Color Style Manager")
+        title.setObjectName("titleLabel")
+        title.setAlignment(Qt.AlignCenter)
+        frame_layout.addWidget(title)
+
+        palette_group = QGroupBox("Palettes")
+        palette_layout = QVBoxLayout(palette_group)
+
+        self.palette_list = QListWidget()
+        self.palette_list.currentRowChanged.connect(self._on_palette_selected)
+        palette_layout.addWidget(self.palette_list)
+
+        frame_layout.addWidget(palette_group)
+
+        preview_group = QGroupBox("Palette Preview")
+        preview_layout = QVBoxLayout(preview_group)
+
+        self.swatch_frame = QFrame()
+        self.swatch_layout = QHBoxLayout(self.swatch_frame)
+        self.swatch_layout.setContentsMargins(4, 4, 4, 4)
+        self.swatch_layout.setSpacing(2)
+        self.swatches = []
+        for i in range(8):
+            swatch = ColorSwatch(QColor(128, 128, 128), PALETTE_COLOR_NAMES[i])
+            self.swatches.append(swatch)
+            self.swatch_layout.addWidget(swatch)
+
+        preview_layout.addWidget(self.swatch_frame)
+
+        self.palette_name_label = QLabel("")
+        self.palette_name_label.setAlignment(Qt.AlignCenter)
+        preview_layout.addWidget(self.palette_name_label)
+
+        frame_layout.addWidget(preview_group)
+
+        ncolors_group = QGroupBox("Color Mode")
+        ncolors_layout = QHBoxLayout(ncolors_group)
+
+        self.four_color_cb = QCheckBox("4 Colors")
+        self.eight_color_cb = QCheckBox("8 Colors")
+        self.eight_color_cb.setChecked(True)
+        self.four_color_cb.toggled.connect(self._on_four_color_toggled)
+        self.eight_color_cb.toggled.connect(self._on_eight_color_toggled)
+        ncolors_layout.addWidget(self.four_color_cb)
+        ncolors_layout.addWidget(self.eight_color_cb)
+        ncolors_layout.addStretch()
+
+        frame_layout.addWidget(ncolors_group)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+
+        self.preview_btn = QPushButton("Preview")
+        self.preview_btn.clicked.connect(self._on_preview)
+        btn_layout.addWidget(self.preview_btn)
+
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.clicked.connect(self._on_apply)
+        btn_layout.addWidget(self.apply_btn)
+
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.close)
+        btn_layout.addWidget(self.close_btn)
+
+        frame_layout.addLayout(btn_layout)
+        main_layout.addWidget(frame)
+
+    def _apply_stylesheet(self):
+        state = parse_env_file(env_path())
+        pal = read_palette(state)
+        self.current_palette = pal
+        self.setStyleSheet(build_stylesheet(pal))
+
+    def _load_palette_list(self):
+        self.palette_list.clear()
+        seen = set()
+        for name, path in self.palettes:
+            if name not in seen:
+                seen.add(name)
+                item = QListWidgetItem(name)
+                item.setData(Qt.UserRole, path)
+                self.palette_list.addItem(item)
+
+    def _detect_current_palette(self):
+        current_name = os.environ.get("NSCDE_PALETTE", "")
+        if not current_name:
+            return
+        for i in range(self.palette_list.count()):
+            item = self.palette_list.item(i)
+            if item.text() == current_name:
+                self.palette_list.setCurrentItem(item)
+                break
+
+    def _on_palette_selected(self, row):
+        if row < 0:
+            return
+        item = self.palette_list.item(row)
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        name = item.text()
+        self.selected_palette_path = path
+        self.palette_name_label.setText(name)
+
+        colors = parse_palette_file(path, self.ncolors)
+        for i, swatch in enumerate(self.swatches):
+            if i < len(colors):
+                swatch.set_color(colors[i])
+                swatch.show()
+            else:
+                swatch.hide()
+
+    def _on_four_color_toggled(self, checked):
+        if checked:
+            self.eight_color_cb.blockSignals(True)
+            self.eight_color_cb.setChecked(False)
+            self.eight_color_cb.blockSignals(False)
+            self.ncolors = 4
+            self._update_swatch_visibility()
+        elif not self.eight_color_cb.isChecked():
+            self.four_color_cb.blockSignals(True)
+            self.four_color_cb.setChecked(True)
+            self.four_color_cb.blockSignals(False)
+
+    def _on_eight_color_toggled(self, checked):
+        if checked:
+            self.four_color_cb.blockSignals(True)
+            self.four_color_cb.setChecked(False)
+            self.four_color_cb.blockSignals(False)
+            self.ncolors = 8
+            self._update_swatch_visibility()
+        elif not self.four_color_cb.isChecked():
+            self.eight_color_cb.blockSignals(True)
+            self.eight_color_cb.setChecked(True)
+            self.eight_color_cb.blockSignals(False)
+
+    def _update_swatch_visibility(self):
+        row = self.palette_list.currentRow()
+        if row >= 0:
+            self._on_palette_selected(row)
+
+    def _run_colormgr(self, args, timeout=30):
+        toolsdir = nscde_toolsdir()
+        cmd = [os.path.join(toolsdir, "colormgr")] + args
+        env = dict(os.environ)
+        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+        env.setdefault("NSCDE_DATADIR", nscde_datadir())
+        env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, env=env
+            )
+            return result.returncode, result.stdout.strip(), result.stderr.strip()
+        except subprocess.TimeoutExpired:
+            return -1, "", "timeout"
+        except FileNotFoundError:
+            return -1, "", "colormgr not found"
+
+    def _on_preview(self):
+        if not self.selected_palette_path:
+            return
+        name = self.palette_list.currentItem().text()
+        args = [
+            "-t",
+            "-e",
+            "-c", str(self.ncolors),
+            "-g", name,
+            "-F",
+        ]
+        rc, out, err = self._run_colormgr(args)
+        if rc != 0 and err:
+            QMessageBox.warning(self, "Preview Error", err)
+
+    def _on_apply(self):
+        if not self.selected_palette_path:
+            return
+
+        name = self.palette_list.currentItem().text()
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.setText("Applying...")
+        QApplication.processEvents()
+
+        backend = os.environ.get("NSCDE_BACKEND", "labwc")
+
+        try:
+            # FVWM-only steps: generate colorsets, pixmaps, X resources, backdrops
+            # These are not consumed by the labwc backend
+            if backend != "labwc":
+                args = [
+                    "-c", str(self.ncolors),
+                    "-g", name,
+                    "-F",
+                ]
+                rc, out, err = self._run_colormgr(args, timeout=60)
+                if rc != 0:
+                    QMessageBox.warning(
+                        self, "Apply Error", "Failed to apply palette: {}".format(err)
+                    )
+                    return
+
+                args_p = [
+                    "-c", str(self.ncolors),
+                    "-g", name,
+                    "-P",
+                ]
+                self._run_colormgr(args_p, timeout=60)
+
+                args_x = [
+                    "-c", str(self.ncolors),
+                    "-g", name,
+                    "-X",
+                ]
+                self._run_colormgr(args_x, timeout=30)
+
+                args_b = [
+                    "-c", str(self.ncolors),
+                    "-g", name,
+                    "-b",
+                ]
+                self._run_colormgr(args_b, timeout=60)
+
+            self._record_and_apply(name)
+
+        finally:
+            self.apply_btn.setEnabled(True)
+            self.apply_btn.setText("Apply")
+
+    def _record_and_apply(self, palette_name):
+        toolsdir = nscde_toolsdir()
+        backend = os.environ.get("NSCDE_BACKEND", "labwc")
+
+        palette_path = None
+        user_pal = os.path.join(
+            nscde_fvwm_userdir(), "palettes", "{}.dp".format(palette_name)
+        )
+        sys_pal = os.path.join(
+            nscde_datadir(), "palettes", "{}.dp".format(palette_name)
+        )
+        if os.path.exists(user_pal):
+            palette_path = user_pal
+        elif os.path.exists(sys_pal):
+            palette_path = sys_pal
+
+        if not palette_path:
+            return
+
+        env = dict(os.environ)
+        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
+        env.setdefault("NSCDE_DATADIR", nscde_datadir())
+        env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
+        env.setdefault("NSCDE_BACKEND", backend)
+        env["NSCDE_PALETTE_FILE"] = palette_path
+
+        shlib = os.path.join(toolsdir, "style_managers.shlib")
+        if os.path.exists(shlib):
+            cmd = (
+                '. "{shlib}" && '
+                "nscde_style_record_palette \"{pal}\" \"{nc}\" && "
+                "nscde_style_backend_apply"
+            ).format(shlib=shlib, pal=palette_path, nc=self.ncolors)
+            try:
+                result = subprocess.run(
+                    ["ksh", "-c", cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    env=env,
+                )
+                if result.returncode != 0:
+                    err = result.stderr.strip() or result.stdout.strip() or (
+                        "backend apply exited with status {}".format(result.returncode)
+                    )
+                    append_debug_log(
+                        "colormgr apply",
+                        "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
+                            cmd, result.returncode, result.stdout, result.stderr
+                        ),
+                    )
+                    QMessageBox.warning(self, "Apply Error", err)
+            except subprocess.TimeoutExpired:
+                append_debug_log("colormgr apply", "timeout running: {}".format(cmd))
+                QMessageBox.warning(self, "Apply Error", "Timed out while applying palette")
+
+
+def main():
+    app = QApplication(sys.argv)
+    mgr = NsCDEColorMgr()
+    mgr.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
