@@ -3,17 +3,51 @@ name:               nscde-wayland-runtime
 version:            0.1.0.0
 build-type:         Simple
 
-executable nscde-runtime
-  main-is:             nscde-runtime.hs
-  hs-source-dirs:      haskell/app haskell/src
-  other-modules:
-      NsCDE.Runtime.EnvFile
-    , NsCDE.Runtime.LabwcMenu
-    , NsCDE.Runtime.LabwcSession
-    , NsCDE.Runtime.PanelLayout
+library
+  hs-source-dirs:      haskell/src
+  exposed-modules:
+      NsCDE.Backend.Labwc.KeybindXml
+    , NsCDE.Backend.Labwc.MenuXml
+    , NsCDE.Backend.Labwc.RcXml
+    , NsCDE.Backend.Labwc.SessionFiles
+    , NsCDE.Domain.Keybinds
+    , NsCDE.Domain.Menu
+    , NsCDE.Domain.PanelLayout
+    , NsCDE.Domain.Session
+    , NsCDE.Foundation.Common
+    , NsCDE.Foundation.EnvFile
+    , NsCDE.Foundation.Settings
+    , NsCDE.Parse.AppMenus
+    , NsCDE.Parse.Keybindings
+    , NsCDE.Policy.Keybinds
+    , NsCDE.Policy.Menu
+    , NsCDE.Policy.PanelLayout
+    , NsCDE.Policy.SessionPlan
   build-depends:
       base >=4.14 && <5
     , directory
     , filepath
+  default-language:    Haskell2010
+  ghc-options:         -Wall
+
+executable nscde-runtime
+  main-is:             nscde-runtime.hs
+  hs-source-dirs:      haskell/app
+  build-depends:
+      base >=4.14 && <5
+    , directory
+    , filepath
+    , nscde-wayland-runtime
+  default-language:    Haskell2010
+  ghc-options:         -Wall
+
+test-suite runtime-tests
+  type:                exitcode-stdio-1.0
+  main-is:             Main.hs
+  hs-source-dirs:      haskell/test
+  build-depends:
+      base >=4.14 && <5
+    , HUnit
+    , nscde-wayland-runtime
   default-language:    Haskell2010
   ghc-options:         -Wall

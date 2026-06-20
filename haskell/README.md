@@ -6,20 +6,27 @@ This directory is now the start of the `NsCDE` semantic runtime layer in the
 Current implemented slice:
 
 - `app/nscde-runtime.hs`
-  - first runtime CLI entrypoint
-- `src/NsCDE/Runtime/PanelLayout.hs`
-  - typed panel-layout policy transform
-- `src/NsCDE/Runtime/LabwcSession.hs`
-  - typed `labwc` session-file publisher for `autostart`, `environment`, and
-    `shutdown`, plus `rc.xml` generation from normalized launcher inputs
-- `src/NsCDE/Runtime/EnvFile.hs`
-  - shared key/value file reader for the first runtime contract
+  - thin runtime CLI entrypoint
+- `src/NsCDE/Foundation/`
+  - shared env-file, lookup, escaping, quoting, and atomic-write helpers
+- `src/NsCDE/Domain/`
+  - typed panel, menu, keybind, and session records
+- `src/NsCDE/Parse/`
+  - legacy `AppMenus.conf` and `Keybindings.*` import paths
+- `src/NsCDE/Policy/`
+  - typed panel-layout, menu, keybind, and session planning logic
+- `src/NsCDE/Backend/Labwc/`
+  - `menu.xml`, keybind XML, `rc.xml`, and session-file renderers
+- `test/Main.hs`
+  - runtime parser and renderer coverage under the Cabal test suite
 
 Current live contract:
 
 - `Nix` materializes a static reference panel profile
 - the Haskell runtime reads that profile plus runtime env overrides
 - the runtime publishes normalized `panel-layout.env`
+- the runtime publishes `labwc` `menu.xml` from parsed `AppMenus.conf`
+- the runtime publishes `labwc` keybind XML from parsed `Keybindings.*`
 - the runtime publishes `labwc` session support files from launcher/session
   inputs
 - the runtime now publishes `labwc` `rc.xml` from normalized workspace/theme/
@@ -43,3 +50,11 @@ Planned internal shape:
 - `app/` for executable entrypoints
 - `src/` for library code
 - `test/` for runtime model and generator tests
+
+Current commands:
+
+- `nscde-runtime panel-layout publish [STATIC_PANEL_LAYOUT_FILE]`
+- `nscde-runtime labwc-menu publish CONFIG_DIR`
+- `nscde-runtime labwc-keybinds publish`
+- `nscde-runtime labwc-rc publish CONFIG_DIR`
+- `nscde-runtime labwc-session publish CONFIG_DIR`

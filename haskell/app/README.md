@@ -1,6 +1,15 @@
-# Anticipated Haskell App Entry Points
+# Haskell App Entry Points
 
-Planned executable entrypoints include:
+Current executable entrypoint:
+
+- `nscde-runtime`
+  - `panel-layout publish [STATIC_PANEL_LAYOUT_FILE]`
+  - `labwc-menu publish CONFIG_DIR`
+  - `labwc-keybinds publish`
+  - `labwc-rc publish CONFIG_DIR`
+  - `labwc-session publish CONFIG_DIR`
+
+Planned future executable entrypoints still include:
 
 - `nscde-sessiond`
 - `nscde-labwc-launch`

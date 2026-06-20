@@ -443,8 +443,16 @@ prepare_runtime()
    publish_runtime_contracts
 
    startup_log "keybindgen:start"
-   if [ -x "$NSCDE_TOOLSDIR/nscde_labwc_keybindgen" ]; then
+   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
+      if _keybind_xml=$("$NSCDE_RUNTIME_BIN" labwc-keybinds publish 2>/dev/null); then
+         startup_log "keybindgen:runtime:done"
+      else
+         _keybind_xml=""
+         startup_log "keybindgen:runtime:failed"
+      fi
+   elif [ -x "$NSCDE_TOOLSDIR/nscde_labwc_keybindgen" ]; then
       _keybind_xml=$("$NSCDE_TOOLSDIR/nscde_labwc_keybindgen" 2>/dev/null) || true
+      startup_log "keybindgen:shim:done"
    fi
    _labwc_keybind_xml_file="${NSCDE_STATE_DIR}/labwc-keybinds.xml"
    if [ -n "$_keybind_xml" ]; then

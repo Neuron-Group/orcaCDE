@@ -1,19 +1,21 @@
 # NsCDE-Wayland
 
-This directory is the standalone repository scaffold for the `Wayland` rewrite.
+This directory is the standalone repository root for the `Wayland` runtime.
 
 It lives beside the original [NsCDE](/home/neuron/Projects/CDEwrapper/NsCDE)
 tree on purpose:
 
-- `NsCDE/` remains the legacy upstream, behavior reference, and asset source
+- `NsCDE/` remains the legacy upstream, behavior reference, and imported-asset
+  source
 - `NsCDE-Wayland/` is the new runtime ownership target for:
   - `Haskell` semantic runtime code
   - `C` `Wayland` clients
   - `Nix` static configuration and wrapper material
   - extracted assets that the `Wayland` path still consumes
 
-This scaffold does not claim full independence yet. It is the start of the
-repo split, with explicit extracted inputs and a reproducible sync path.
+This repo is the runtime owner now. It still carries some transitional imported
+inputs and sync tooling, but the `Wayland` adaptation should no longer be
+treated as a patch layered onto the original `NsCDE/` tree.
 
 It now also has a local bootstrap build root:
 
@@ -65,14 +67,17 @@ Current verified bootstrap status:
     `Haskell`, `Nix`, or native clients
   - `nscde_labwc_menugen` is no longer on the packaged launcher path; `menu.xml`
     is now published by `nscde-runtime`
+  - `nscde_labwc_keybindgen` is now a compatibility wrapper; the launcher
+    prefers `nscde-runtime` for keybind generation too
 - `doc/`
   - standalone-split notes and asset provenance
 - `tools/sync-from-nscde.sh`
-  - refreshes this scaffold from the current `NsCDE/` source tree
+  - refreshes selected imported migration inputs from the current `NsCDE/`
+    source tree when intentionally needed
 
 ## Current policy
 
-The new tree should become the owner of the `Wayland` path.
+This tree is the owner of the `Wayland` runtime path.
 
 The old `NsCDE/` tree should be treated as:
 
@@ -82,7 +87,8 @@ The old `NsCDE/` tree should be treated as:
 
 ## Sync
 
-Refresh the scaffold from the current `NsCDE/` tree with:
+Refresh selected imported migration inputs from the current `NsCDE/` tree
+with:
 
 ```sh
 ./tools/sync-from-nscde.sh

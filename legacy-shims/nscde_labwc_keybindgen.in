@@ -10,6 +10,11 @@
 # Outputs: labwc <keyboard> XML fragment to stdout
 #
 
+_runtime_bin="${NSCDE_RUNTIME_BIN:-nscde-runtime}"
+if [ -z "${NSCDE_KEYBINDGEN_SHIM_BYPASS:-}" ] && command -v "$_runtime_bin" >/dev/null 2>&1; then
+   exec "$_runtime_bin" labwc-keybinds publish "$@"
+fi
+
 # Required environment
 if [ -z "$NSCDE_DATADIR" ]; then
    echo "Error: NSCDE_DATADIR must be set." >&2

@@ -2,10 +2,10 @@
 
 ## Purpose
 
-This tree is the first concrete split of the `Wayland` rewrite into a
-standalone repository layout beside the original `NsCDE` source tree.
+This tree is the standalone repository layout for the `Wayland` runtime,
+living beside the original `NsCDE` source tree.
 
-The assumption behind the split is:
+The assumption behind this layout is:
 
 - the `Wayland` path is already diverging structurally from the legacy
   `FVWM`/`X11` runtime
@@ -45,7 +45,7 @@ Imported assets:
 
 ## What is intentionally not imported
 
-This scaffold does not copy the full legacy repository.
+This standalone runtime repo does not copy the full legacy repository.
 
 Not imported as primary source:
 
@@ -56,19 +56,20 @@ Not imported as primary source:
 
 ## Near-term expectation
 
-This is still a migration scaffold, not the final cutover.
+This is the runtime home for the `Wayland` path, but it still contains
+transitional imported assets and shell-era compatibility seams.
 
 Near-term work should:
 
 1. keep moving runtime ownership from `legacy-shims/` into `haskell/`
 2. keep `src/` focused on `Wayland`-native mechanics only
 3. keep asset extraction explicit through `ASSETS.manifest`
-4. treat `NsCDE/` as the source to compare against, not the place where the
-   new runtime architecture must stay rooted forever
+4. treat `NsCDE/` as a historical behavior reference and optional sync source,
+   not the place where the new runtime architecture should keep living
 
 ## Bootstrap build root
 
-This scaffold now includes a standalone bootstrap project root:
+This repo now includes a standalone bootstrap project root:
 
 - `flake.nix`
 - `cabal.project`
@@ -97,21 +98,24 @@ Current buildable slice:
 
 Current limitation:
 
-- `legacy-shims/` still owns too much session/menu/theme glue for the tree to
+- `legacy-shims/` still owns too much session/theme/style glue for the tree to
   count as a fully standalone runtime
 - some of those remaining pieces still live as `.in` templates because they
   rely on configure-style substitution during packaging
 - `menu.xml` generation has already moved out of that set: the standalone
   launcher now uses `nscde-runtime` for menu publishing, and the packaged
   bootstrap no longer ships `nscde_labwc_menugen`
+- keybind generation has now moved with it: the standalone launcher prefers
+  `nscde-runtime labwc-keybinds publish`, and `nscde_labwc_keybindgen` remains
+  only as a compatibility wrapper
 
 ## Repo layout decision
 
-Yes: the rewrite can now be laid out as a singleton repository beside the
+Yes: the rewrite is now laid out as a standalone repository beside the
 original `NsCDE` tree.
 
 That arrangement matches the technical reality better than keeping the
-Wayland-specific runtime hidden inside the legacy repo:
+`Wayland` runtime framed as an extension of the legacy repo:
 
 - `NsCDE/` stays available as behavior reference, upstream history, and asset
   source during migration
