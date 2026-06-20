@@ -1,12 +1,17 @@
 module NsCDE.Policy.SessionPlan
   ( buildRcConfig
+  , buildRcInputFromEnv
   , buildSessionPlan
   ) where
 
-import Data.Char (isSpace)
 import System.FilePath ((</>))
 
 import NsCDE.Domain.Session
+import NsCDE.Domain.Style
+  ( FocusPolicy(..)
+  , StyleState(..)
+  )
+import NsCDE.Foundation.Common (shellQuote, splitCommaList)
 import NsCDE.Foundation.EnvFile (KeyValue)
 import NsCDE.Foundation.Settings (lookupText)
 
@@ -21,6 +26,7 @@ buildSessionPlan env =
         , renderShellExport "NSCDE_DATADIR" dataDir
         , renderShellExport "FVWM_USERDIR" fvwmUserDir
         , renderShellExport "NSCDE_LABWC_THEME_NAME" themeName
+        , renderShellExport "NSCDE_LABWC_CONFIG_DIR" labwcConfigDir
         , renderShellExport "NSCDE_LABWC_WORKSPACES" workspaces
         , renderShellExport "NSCDE_LABWC_CURRENT_WORKSPACE" currentWorkspace
         , renderShellExport "NSCDE_LABWC_AUTOSTART_TERMINAL" autostartTerminal
@@ -53,6 +59,7 @@ buildSessionPlan env =
         , ("FVWM_USERDIR", fvwmUserDir)
         , ("NSCDE_PALETTE_FILE", paletteFile)
         , ("NSCDE_LABWC_THEME_NAME", themeName)
+        , ("NSCDE_LABWC_CONFIG_DIR", labwcConfigDir)
         , ("NSCDE_LABWC_WORKSPACES", workspaces)
         , ("NSCDE_LABWC_CURRENT_WORKSPACE", currentWorkspace)
         , ("NSCDE_LABWC_AUTOSTART_TERMINAL", autostartTerminal)
@@ -83,6 +90,7 @@ buildSessionPlan env =
     homeDir = lookupText env "HOME" ""
     fvwmUserDir = lookupText env "FVWM_USERDIR" (homeDir ++ "/.NsCDE")
     themeName = lookupText env "NSCDE_THEME_NAME" (lookupText env "NSCDE_LABWC_THEME_NAME" "NsCDE-Stage1")
+    labwcConfigDir = lookupText env "NSCDE_LABWC_CONFIG_DIR" ""
     workspaces = lookupText env "NSCDE_WORKSPACES" (lookupText env "NSCDE_LABWC_WORKSPACES" "One,Two,Three,Four")
     currentWorkspace = lookupText env "NSCDE_CURRENT_WORKSPACE" (lookupText env "NSCDE_LABWC_CURRENT_WORKSPACE" "One")
     autostartTerminal = lookupText env "NSCDE_LABWC_AUTOSTART_TERMINAL" "1"
@@ -95,27 +103,43 @@ buildSessionPlan env =
     staticPanelLayoutFile = lookupText env "NSCDE_STATIC_PANEL_LAYOUT_FILE" ""
     staticSessionEnvFile = lookupText env "NSCDE_STATIC_SESSION_ENV_FILE" ""
 
-buildRcConfig :: [KeyValue] -> String -> RcConfig
-buildRcConfig env keybindXml =
+buildRcInputFromEnv :: [KeyValue] -> String -> RcInput
+buildRcInputFromEnv env keybindXml =
+  RcInput
+    { rcInputThemeName =
+        lookupText env "NSCDE_THEME_NAME"
+          (lookupText env "NSCDE_LABWC_THEME_NAME" "NsCDE-Stage1")
+    , rcInputTitleFont =
+        RcFont
+          { rcFontPlace = ""
+          , rcFontName = lookupText env "NSCDE_LABWC_TITLE_FONT_NAME" "Sans"
+          , rcFontSize = lookupText env "NSCDE_LABWC_TITLE_FONT_SIZE" "10"
+          , rcFontSlant = lookupText env "NSCDE_LABWC_TITLE_FONT_SLANT" "normal"
+          , rcFontWeight = lookupText env "NSCDE_LABWC_TITLE_FONT_WEIGHT" "bold"
+          }
+    , rcInputWorkspaces = resolveWorkspaces env
+    , rcInputKeybindXml = keybindXml
+    }
+
+buildRcConfig :: RcInput -> StyleState -> RcConfig
+buildRcConfig rcInput styleState =
   RcConfig
-    { rcThemeName = themeName
+    { rcThemeName = rcInputThemeName rcInput
     , rcFollowMouse = followMouse
+    , rcFollowMouseRequiresMovement = followMouseRequiresMovement
     , rcRaiseOnFocus = raiseOnFocus
+    , rcRaiseOnFocusDelayMs = raiseOnFocusDelayMs
     , rcFonts =
-        [ RcFont "ActiveWindow" fontName fontSize fontSlant fontWeight
-        , RcFont "InactiveWindow" fontName fontSize fontSlant fontWeight
+        [ titleFont {rcFontPlace = "ActiveWindow"}
+        , titleFont {rcFontPlace = "InactiveWindow"}
         ]
-    , rcWorkspaces = resolveWorkspaces env
-    , rcKeybindXml = keybindXml
+    , rcWorkspaces = rcInputWorkspaces rcInput
+    , rcKeybindXml = rcInputKeybindXml rcInput
     }
   where
-    themeName = lookupText env "NSCDE_THEME_NAME" (lookupText env "NSCDE_LABWC_THEME_NAME" "NsCDE-Stage1")
-    followMouse = lookupText env "NSCDE_LABWC_FOLLOW_MOUSE" "yes"
-    raiseOnFocus = lookupText env "NSCDE_LABWC_RAISE_ON_FOCUS" "no"
-    fontName = lookupText env "NSCDE_LABWC_TITLE_FONT_NAME" "Sans"
-    fontSize = lookupText env "NSCDE_LABWC_TITLE_FONT_SIZE" "10"
-    fontSlant = lookupText env "NSCDE_LABWC_TITLE_FONT_SLANT" "normal"
-    fontWeight = lookupText env "NSCDE_LABWC_TITLE_FONT_WEIGHT" "bold"
+    titleFont = rcInputTitleFont rcInput
+    (followMouse, followMouseRequiresMovement, raiseOnFocus, raiseOnFocusDelayMs) =
+      labwcFocusSettings styleState
 
 resolveWorkspaces :: [KeyValue] -> [String]
 resolveWorkspaces env =
@@ -125,22 +149,20 @@ resolveWorkspaces env =
   where
     workspaceText = lookupText env "NSCDE_WORKSPACES" (lookupText env "NSCDE_LABWC_WORKSPACES" "")
 
-splitCommaList :: String -> [String]
-splitCommaList raw =
-  filter (not . null) (map trim (splitOnComma raw))
-
-splitOnComma :: String -> [String]
-splitOnComma "" = [""]
-splitOnComma value =
-  case break (== ',') value of
-    (chunk, []) -> [chunk]
-    (chunk, _:rest) -> chunk : splitOnComma rest
-
-trim :: String -> String
-trim = dropWhileEnd isSpace . dropWhile isSpace
-
-dropWhileEnd :: (a -> Bool) -> [a] -> [a]
-dropWhileEnd predicate = reverse . dropWhile predicate . reverse
+labwcFocusSettings :: StyleState -> (Bool, Bool, Bool, Int)
+labwcFocusSettings styleState =
+  case styleFocusPolicy styleState of
+    ClickToFocus ->
+      (False, True, True, 0)
+    SloppyFocus ->
+      (True, False, autoRaiseEnabled, raiseDelayMs)
+    MouseFocus ->
+      (True, True, autoRaiseEnabled, raiseDelayMs)
+  where
+    autoRaiseEnabled = styleAutoRaise styleState
+    raiseDelayMs
+      | autoRaiseEnabled = styleRaiseDelayMs styleState
+      | otherwise = 0
 
 renderShellExport :: String -> String -> String
 renderShellExport key value =
@@ -161,10 +183,3 @@ renderTerminalLaunch autostartTerminal terminal
       , "fi"
       ]
   | otherwise = []
-
-shellQuote :: String -> String
-shellQuote value =
-  "'" ++ concatMap escapeChar value ++ "'"
-  where
-    escapeChar '\'' = "'\"'\"'"
-    escapeChar ch = [ch]

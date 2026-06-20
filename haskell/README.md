@@ -14,9 +14,12 @@ Current implemented slice:
 - `src/NsCDE/Parse/`
   - legacy `AppMenus.conf` and `Keybindings.*` import paths
 - `src/NsCDE/Policy/`
-  - typed panel-layout, menu, keybind, and session planning logic
+  - typed panel-layout, menu, keybind, session, and style-apply planning logic
 - `src/NsCDE/Backend/Labwc/`
-  - `menu.xml`, keybind XML, `rc.xml`, and session-file renderers
+  - `menu.xml`, keybind XML, `rc.xml`, theme, and session/apply renderers
+- `src/NsCDE/Store/`
+  - normalized runtime state storage, including resolved style snapshots used
+    by the daemon and style-apply flow
 - `test/Main.hs`
   - runtime parser and renderer coverage under the Cabal test suite
 
@@ -27,10 +30,13 @@ Current live contract:
 - the runtime publishes normalized `panel-layout.env`
 - the runtime publishes `labwc` `menu.xml` from parsed `AppMenus.conf`
 - the runtime publishes `labwc` keybind XML from parsed `Keybindings.*`
+- the runtime publishes the `labwc` theme directly from palette inputs
 - the runtime publishes `labwc` session support files from launcher/session
   inputs
 - the runtime now publishes `labwc` `rc.xml` from normalized workspace/theme/
   font/focus inputs and generated keybind XML fragments
+- the runtime now owns `style.env` updates plus `style-apply` regeneration for
+  `rc.xml`, theme, backdrop, toolkit font targets, and panel palette refresh
 - `nscde_paneld` consumes that file as its `Wayland`-native policy input
 
 This is intentionally a first extraction, not the full runtime migration yet.
@@ -56,5 +62,6 @@ Current commands:
 - `nscde-runtime panel-layout publish [STATIC_PANEL_LAYOUT_FILE]`
 - `nscde-runtime labwc-menu publish CONFIG_DIR`
 - `nscde-runtime labwc-keybinds publish`
+- `nscde-runtime labwc-theme publish`
 - `nscde-runtime labwc-rc publish CONFIG_DIR`
 - `nscde-runtime labwc-session publish CONFIG_DIR`

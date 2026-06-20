@@ -5,12 +5,38 @@ import Test.HUnit
 import NsCDE.Backend.Labwc.KeybindXml (renderKeyboardXml)
 import NsCDE.Backend.Labwc.MenuXml (renderMenuXml)
 import NsCDE.Backend.Labwc.RcXml (renderRcXml)
+import NsCDE.Backend.Labwc.Theme (renderLabwcThemeFiles)
 import NsCDE.Domain.Keybinds
 import NsCDE.Domain.Menu
+import NsCDE.Domain.Palette (PaletteColor, parseHexColor8)
 import NsCDE.Domain.PanelLayout
+import NsCDE.Domain.Session (RcFont(..), RcInput(..))
+import NsCDE.Domain.Style
+  ( FocusPolicy(..)
+  , IconFill(..)
+  , IconPlacement(..)
+  , IconSize(..)
+  , defaultStyleState
+  , styleAutoRaise
+  , styleEdgeMoveDelayMs
+  , styleEdgeMoveResistancePx
+  , styleEdgeResistancePx
+  , styleFocusPolicy
+  , styleIconFill
+  , styleIconPlacement
+  , styleIconSize
+  , styleMoveThresholdPx
+  , styleOpaqueMovePercent
+  , stylePagerPreview
+  , styleRaiseDelayMs
+  , styleRaiseFrontPanelOnPage
+  )
 import NsCDE.Foundation.EnvFile (renderEnvFile)
 import NsCDE.Parse.AppMenus (parseAppMenuContents)
 import NsCDE.Parse.Keybindings (parseKeybindingsContents)
+import NsCDE.Parse.StyleMgrIni (lookupIniValueInContents)
+import NsCDE.Parse.StyleState (parseStyleStateEntries)
+import NsCDE.Policy.Backdrop (backdropCandidatePaths)
 import NsCDE.Policy.Menu (buildMenuModel)
 import NsCDE.Policy.PanelLayout (emitPanelLayout)
 import NsCDE.Policy.SessionPlan (buildRcConfig)
@@ -30,7 +56,12 @@ tests =
     , TestLabel "menu rendering" testMenuRendering
     , TestLabel "keybind rendering" testKeybindRendering
     , TestLabel "rc rendering" testRcRendering
+    , TestLabel "rc focus mapping" testRcFocusMapping
     , TestLabel "panel env rendering" testPanelEnvRendering
+    , TestLabel "style ini parsing" testStyleIniParsing
+    , TestLabel "style state parsing" testStyleStateParsing
+    , TestLabel "theme rendering" testThemeRendering
+    , TestLabel "backdrop candidates" testBackdropCandidates
     ]
 
 testAppMenuParsing :: Test
@@ -79,15 +110,49 @@ testKeybindRendering =
 testRcRendering :: Test
 testRcRendering =
   TestCase $ do
-    let rcXml =
+    let rcInput =
+          RcInput
+            { rcInputThemeName = "NsCDE-Stage1"
+            , rcInputTitleFont =
+                RcFont "" "DejaVu Sans" "10" "normal" "bold"
+            , rcInputWorkspaces = ["Alpha", "Beta"]
+            , rcInputKeybindXml =
+                "  <keyboard>\n    <default />\n  </keyboard>\n"
+            }
+        rcXml =
           renderRcXml
-            (buildRcConfig
-              [ ("NSCDE_THEME_NAME", "NsCDE-Stage1")
-              , ("NSCDE_LABWC_WORKSPACES", "Alpha,Beta")
-              ]
-              "  <keyboard>\n    <default />\n  </keyboard>\n")
+            (buildRcConfig rcInput defaultStyleState)
     assertBool "workspace count present" ("<number>2</number>" `containsSubstring` rcXml)
     assertBool "keyboard fragment preserved" ("<keyboard>" `containsSubstring` rcXml)
+    assertBool "default focus follow mouse" ("<followMouse>yes</followMouse>" `containsSubstring` rcXml)
+    assertBool "default focus requires movement" ("<followMouseRequiresMovement>yes</followMouseRequiresMovement>" `containsSubstring` rcXml)
+    assertBool "default raise on focus disabled" ("<raiseOnFocus>no</raiseOnFocus>" `containsSubstring` rcXml)
+
+testRcFocusMapping :: Test
+testRcFocusMapping =
+  TestCase $ do
+    let rcInput =
+          RcInput
+            { rcInputThemeName = "NsCDE-Stage1"
+            , rcInputTitleFont =
+                RcFont "" "DejaVu Sans" "10" "normal" "bold"
+            , rcInputWorkspaces = ["Alpha", "Beta"]
+            , rcInputKeybindXml =
+                "  <keyboard>\n    <default />\n  </keyboard>\n"
+            }
+        styleState =
+          defaultStyleState
+            { styleFocusPolicy = SloppyFocus
+            , styleAutoRaise = True
+            , styleRaiseDelayMs = 250
+            }
+        rcXml =
+          renderRcXml
+            (buildRcConfig rcInput styleState)
+    assertBool "sloppy focus follow mouse" ("<followMouse>yes</followMouse>" `containsSubstring` rcXml)
+    assertBool "sloppy focus does not require movement" ("<followMouseRequiresMovement>no</followMouseRequiresMovement>" `containsSubstring` rcXml)
+    assertBool "auto raise enabled" ("<raiseOnFocus>yes</raiseOnFocus>" `containsSubstring` rcXml)
+    assertBool "raise delay preserved" ("<raiseOnFocusDelay>250</raiseOnFocusDelay>" `containsSubstring` rcXml)
 
 testPanelEnvRendering :: Test
 testPanelEnvRendering =
@@ -98,6 +163,97 @@ testPanelEnvRendering =
               samplePanelProfile)
     assertBool "panel layout source present" ("NSCDE_PANEL_LAYOUT_SOURCE=haskell-runtime" `containsSubstring` envText)
     assertBool "panel profile present" ("NSCDE_PANEL_PROFILE=reference" `containsSubstring` envText)
+
+testStyleIniParsing :: Test
+testStyleIniParsing =
+  TestCase $ do
+    let iniContents =
+          unlines
+            [ "[FontMgr]"
+            , "integrate_gtk3=1"
+            , "integrate_qt5 = yes"
+            , ""
+            , "[Other]"
+            , "ignored=value"
+            ]
+    assertEqual "gtk3 flag parsed" (Just "1") (lookupIniValueInContents "FontMgr" "integrate_gtk3" iniContents)
+    assertEqual "qt5 flag parsed" (Just "yes") (lookupIniValueInContents "FontMgr" "integrate_qt5" iniContents)
+    assertEqual "missing key" Nothing (lookupIniValueInContents "FontMgr" "integrate_local" iniContents)
+
+testStyleStateParsing :: Test
+testStyleStateParsing =
+  TestCase $ do
+    let styleState =
+          parseStyleStateEntries
+            [ ("NSCDE_FOCUS_POLICY", "SloppyFocus")
+            , ("NSCDE_AUTO_RAISE", "1")
+            , ("NSCDE_RAISE_DELAY", "175")
+            , ("NSCDE_OPAQUE_MOVE", "85")
+            , ("NSCDE_MOVE_THRESHOLD", "3")
+            , ("NSCDE_ICON_PLACEMENT", "1")
+            , ("NSCDE_ICON_FILL", "top.right")
+            , ("NSCDE_ICON_SIZE", "32,32,96,96")
+            , ("NSCDE_RAISE_FP_ON_PAGE", "1")
+            , ("NSCDE_PAGER_PREVIEW", "1")
+            , ("NSCDE_EDGE_RESISTANCE", "500")
+            , ("NSCDE_EDGE_MOVE_RESISTANCE", "25")
+            , ("NSCDE_EDGE_MOVE_DELAY", "400")
+            ]
+        parsedIconSize = styleIconSize styleState
+    assertEqual "focus policy parsed" SloppyFocus (styleFocusPolicy styleState)
+    assertBool "auto raise parsed" (styleAutoRaise styleState)
+    assertEqual "raise delay parsed" 175 (styleRaiseDelayMs styleState)
+    assertEqual "opaque move parsed" 85 (styleOpaqueMovePercent styleState)
+    assertEqual "move threshold parsed" 3 (styleMoveThresholdPx styleState)
+    assertEqual "icon placement parsed" IconPlacementIconBox (styleIconPlacement styleState)
+    assertEqual "icon fill parsed" IconFillTopRight (styleIconFill styleState)
+    assertEqual "icon default width parsed" 32 (styleIconDefaultWidth parsedIconSize)
+    assertEqual "icon max height parsed" 96 (styleIconMaxHeight parsedIconSize)
+    assertBool "front panel raise parsed" (styleRaiseFrontPanelOnPage styleState)
+    assertBool "pager preview parsed" (stylePagerPreview styleState)
+    assertEqual "edge resistance parsed" 500 (styleEdgeResistancePx styleState)
+    assertEqual "edge move resistance parsed" 25 (styleEdgeMoveResistancePx styleState)
+    assertEqual "edge move delay parsed" 400 (styleEdgeMoveDelayMs styleState)
+
+testThemeRendering :: Test
+testThemeRendering =
+  TestCase $ do
+    let themeFiles =
+          renderLabwcThemeFiles
+            [ expectPaletteColor "#102030"
+            , expectPaletteColor "#405060"
+            , expectPaletteColor "#708090"
+            , expectPaletteColor "#90a0b0"
+            , expectPaletteColor "#b0c0d0"
+            , expectPaletteColor "#d0e0f0"
+            ]
+    case lookup "themerc" themeFiles of
+      Just themerc -> do
+        assertBool "active title uses palette slot one" ("window.active.title.bg.color: #102030" `containsSubstring` themerc)
+        assertBool "inactive title uses palette slot two" ("window.inactive.title.bg.color: #405060" `containsSubstring` themerc)
+        assertBool "osd bg uses palette slot six" ("osd.bg.color: #d0e0f0" `containsSubstring` themerc)
+      Nothing ->
+        assertFailure "expected themerc output"
+    case lookup "menu-active.xpm" themeFiles of
+      Just menuXpm ->
+        assertBool "menu xpm emitted" ("static char *menu_xpm[]" `containsSubstring` menuXpm)
+      Nothing ->
+        assertFailure "expected menu-active.xpm output"
+    case lookup "2x/close.xbm" themeFiles of
+      Just close2x ->
+        assertBool "2x close glyph emitted" ("#define close_width 16" `containsSubstring` close2x)
+      Nothing ->
+        assertFailure "expected 2x close glyph output"
+
+testBackdropCandidates :: Test
+testBackdropCandidates =
+  TestCase $
+    assertEqual "tiled backdrop search order"
+      [ "/tmp/home/.NsCDE/backer/Desk1-Example.pm"
+      , "/tmp/home/.NsCDE/backdrops/Example.pm"
+      , "/tmp/assets/backdrops/Example.pm"
+      ]
+      (backdropCandidatePaths "/tmp/home/.NsCDE" "/tmp/assets" "tiled" "Example")
 
 samplePanelProfile :: StaticPanelProfile
 samplePanelProfile =
@@ -178,3 +334,9 @@ isPrefixOf [] _ = True
 isPrefixOf _ [] = False
 isPrefixOf (left:leftRest) (right:rightRest) =
   left == right && isPrefixOf leftRest rightRest
+
+expectPaletteColor :: String -> PaletteColor
+expectPaletteColor rawValue =
+  case parseHexColor8 rawValue of
+    Just color -> color
+    Nothing -> error ("invalid test palette color: " ++ rawValue)

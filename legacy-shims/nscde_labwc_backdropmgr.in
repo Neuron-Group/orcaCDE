@@ -21,28 +21,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+import nscde_runtime_client as runtime_client
 
-PALETTE_KEYS = [
-    "NSCDE_PALETTE_1",
-    "NSCDE_PALETTE_2",
-    "NSCDE_PALETTE_3",
-    "NSCDE_PALETTE_4",
-    "NSCDE_PALETTE_5",
-    "NSCDE_PALETTE_6",
-    "NSCDE_PALETTE_7",
-    "NSCDE_PALETTE_8",
-]
 
-DEFAULT_PALETTE = [
-    "#b7c1ca",
-    "#101010",
-    "#8a9baa",
-    "#4f5964",
-    "#355d84",
-    "#355d84",
-    "#6b7785",
-    "#e7e7e7",
-]
+DEFAULT_PALETTE = runtime_client.DEFAULT_PALETTE
 
 
 def debug_log_path():
@@ -57,39 +39,6 @@ def append_debug_log(title, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write("== {} ==\n{}\n\n".format(title, text))
-
-
-def env_path():
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1", "panel.env")
-
-
-def parse_env_file(path):
-    data = {}
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            data[key] = value
-    return data
-
-
-def read_palette(state):
-    palette = []
-    for key in PALETTE_KEYS:
-        color = state.get(key, "")
-        if color and color.startswith("#") and len(color) == 7:
-            palette.append(color)
-        else:
-            palette.append(None)
-    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
-
 
 def nscde_datadir():
     return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
@@ -107,6 +56,25 @@ def nscde_toolsdir():
         "NSCDE_TOOLSDIR",
         os.path.join(nscde_fvwm_userdir(), "nscde_tools"),
     )
+
+
+def current_palette_path():
+    state = runtime_client.style_state()
+    for key in ["NSCDE_PALETTE_PATH", "NSCDE_PALETTE_FILE"]:
+        value = state.get(key, "")
+        if value and os.path.exists(value):
+            return value
+
+    current_pal = os.environ.get("NSCDE_PALETTE", "Charcoal")
+    for d in [
+        os.path.join(nscde_fvwm_userdir(), "palettes"),
+        os.path.join(nscde_datadir(), "palettes"),
+    ]:
+        path = os.path.join(d, "{}.dp".format(current_pal))
+        if os.path.exists(path):
+            return path
+
+    return os.path.join(nscde_datadir(), "palettes", "Charcoal.dp")
 
 
 def find_backdrops():
@@ -273,7 +241,8 @@ class NsCDEBackdropMgr(QWidget):
         self.selected_backdrop_path = None
         self.selected_photo_path = None
         self.current_desk = 1
-        self.ncolors = 8
+        self.style_state = runtime_client.style_state()
+        self.ncolors = self._current_color_mode()
 
         self._build_ui()
         self._apply_stylesheet()
@@ -370,9 +339,12 @@ class NsCDEBackdropMgr(QWidget):
 
         self._showing_backdrops = True
 
+    def _current_color_mode(self):
+        return 4 if self.style_state.get("NSCDE_COLOR_MODE", "8") == "4" else 8
+
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
-        pal = read_palette(state)
+        state = runtime_client.panel_state()
+        pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
@@ -396,9 +368,15 @@ class NsCDEBackdropMgr(QWidget):
                 self.photo_list.addItem(item)
 
     def _detect_current_desk(self):
-        state = parse_env_file(env_path())
-        workspaces = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
-        current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
+        state = runtime_client.workspaces_state()
+        workspaces = state.get(
+            "NSCDE_WORKSPACES",
+            state.get("NSCDE_PAGER_WORKSPACES", "One,Two,Three,Four"),
+        )
+        current = state.get(
+            "NSCDE_CURRENT_WORKSPACE",
+            state.get("NSCDE_PAGER_CURRENT", "One"),
+        )
         names = [n.strip() for n in workspaces.split(",") if n.strip()]
         try:
             idx = names.index(current)
@@ -458,27 +436,7 @@ class NsCDEBackdropMgr(QWidget):
         env.setdefault("NSCDE_DATADIR", nscde_datadir())
         env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
 
-        palette_path = None
-        state = parse_env_file(env_path())
-        for key in ["NSCDE_PALETTE_FILE"]:
-            val = state.get(key, "")
-            if val and os.path.exists(val):
-                palette_path = val
-                break
-
-        if not palette_path:
-            current_pal = os.environ.get("NSCDE_PALETTE", "Charcoal")
-            for d in [
-                os.path.join(nscde_fvwm_userdir(), "palettes"),
-                os.path.join(nscde_datadir(), "palettes"),
-            ]:
-                p = os.path.join(d, "{}.dp".format(current_pal))
-                if os.path.exists(p):
-                    palette_path = p
-                    break
-
-        if not palette_path:
-            palette_path = os.path.join(nscde_datadir(), "palettes", "Charcoal.dp")
+        palette_path = current_palette_path()
 
         color_variant = self._get_color_variant()
 
@@ -562,29 +520,7 @@ class NsCDEBackdropMgr(QWidget):
             env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
             env.setdefault("NSCDE_BACKEND", backend)
 
-            palette_path = None
-            state = parse_env_file(env_path())
-            for key in ["NSCDE_PALETTE_FILE"]:
-                val = state.get(key, "")
-                if val and os.path.exists(val):
-                    palette_path = val
-                    break
-
-            if not palette_path:
-                current_pal = os.environ.get("NSCDE_PALETTE", "Charcoal")
-                for d in [
-                    os.path.join(nscde_fvwm_userdir(), "palettes"),
-                    os.path.join(nscde_datadir(), "palettes"),
-                ]:
-                    p = os.path.join(d, "{}.dp".format(current_pal))
-                    if os.path.exists(p):
-                        palette_path = p
-                        break
-
-            if not palette_path:
-                palette_path = os.path.join(
-                    nscde_datadir(), "palettes", "Charcoal.dp"
-                )
+            palette_path = current_palette_path()
 
             backer_dir = os.path.join(nscde_fvwm_userdir(), "backer")
             os.makedirs(backer_dir, exist_ok=True)
@@ -615,74 +551,27 @@ class NsCDEBackdropMgr(QWidget):
 
                 shutil.copy2(source_path, dest_path)
 
-            shlib = os.path.join(toolsdir, "style_managers.shlib")
-            if os.path.exists(shlib):
-                cmd = (
-                    '. "{shlib}" && '
-                    'nscde_style_record_backdrop "{desk}" "{mode}" "{image}"'
-                ).format(
-                    shlib=shlib,
-                    desk=self.current_desk,
-                    mode=mode,
-                    image=backdrop_name,
-                )
-                try:
-                    result = subprocess.run(
-                        ["ksh", "-c", cmd],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                        env=env,
-                    )
-                    if result.returncode != 0:
-                        append_debug_log(
-                            "backdrop record",
-                            "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
-                                cmd, result.returncode, result.stdout, result.stderr
-                            ),
-                        )
-                        QMessageBox.warning(
-                            self,
-                            "Apply Error",
-                            result.stderr.strip()
-                            or result.stdout.strip()
-                            or "Failed to record backdrop selection",
-                        )
-                        return
-                except subprocess.TimeoutExpired:
-                    append_debug_log("backdrop record", "timeout running: {}".format(cmd))
-                    QMessageBox.warning(self, "Apply Error", "Timed out while recording backdrop")
-                    return
-
             if backend == "labwc":
-                apply_cmd = (
-                    '. "{shlib}" && nscde_style_backend_apply'
-                ).format(shlib=shlib)
-                try:
-                    result = subprocess.run(
-                        ["ksh", "-c", apply_cmd],
-                        capture_output=True,
-                        text=True,
-                        timeout=30,
-                        env=env,
+                style_values = {
+                    "NSCDE_BACKDROP_DESK_{}_MODE".format(self.current_desk): mode,
+                    "NSCDE_BACKDROP_DESK_{}_IMAGE".format(self.current_desk): backdrop_name,
+                }
+                if not runtime_client.runtime_style_set(style_values, apply=True):
+                    append_debug_log(
+                        "backdrop apply",
+                        "runtime style-set failed for desk {} {} {}".format(
+                            self.current_desk, mode, backdrop_name
+                        ),
                     )
-                    if result.returncode != 0:
-                        append_debug_log(
-                            "backdrop apply",
-                            "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
-                                apply_cmd, result.returncode, result.stdout, result.stderr
-                            ),
-                        )
-                        QMessageBox.warning(
-                            self,
-                            "Apply Error",
-                            result.stderr.strip()
-                            or result.stdout.strip()
-                            or "Failed to apply backdrop",
-                        )
-                except subprocess.TimeoutExpired:
-                    append_debug_log("backdrop apply", "timeout running: {}".format(apply_cmd))
-                    QMessageBox.warning(self, "Apply Error", "Timed out while applying backdrop")
+                    QMessageBox.warning(
+                        self,
+                        "Apply Error",
+                        "Failed to update backdrop state via the runtime daemon.",
+                    )
+                    return
+                self.style_state = runtime_client.style_state()
+                self.ncolors = self._current_color_mode()
+                self._apply_stylesheet()
 
         finally:
             self.apply_btn.setEnabled(True)

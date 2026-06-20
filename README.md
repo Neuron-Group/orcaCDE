@@ -69,6 +69,9 @@ Current verified bootstrap status:
     is now published by `nscde-runtime`
   - `nscde_labwc_keybindgen` is now a compatibility wrapper; the launcher
     prefers `nscde-runtime` for keybind generation too
+  - `nscde_labwc_theme` is now a compatibility wrapper; the launcher and
+    daemon-owned style-apply path publish the `labwc` theme directly from
+    `nscde-runtime`
 - `doc/`
   - standalone-split notes and asset provenance
 - `tools/sync-from-nscde.sh`

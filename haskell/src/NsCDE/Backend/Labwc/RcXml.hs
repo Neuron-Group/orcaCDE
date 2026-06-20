@@ -15,8 +15,10 @@ renderRcXml config =
     , "    <gap>0</gap>\n"
     , "  </core>\n"
     , "  <focus>\n"
-    , "    <followMouse>" ++ escapeXml (rcFollowMouse config) ++ "</followMouse>\n"
-    , "    <raiseOnFocus>" ++ escapeXml (rcRaiseOnFocus config) ++ "</raiseOnFocus>\n"
+    , "    <followMouse>" ++ renderRcBool (rcFollowMouse config) ++ "</followMouse>\n"
+    , "    <followMouseRequiresMovement>" ++ renderRcBool (rcFollowMouseRequiresMovement config) ++ "</followMouseRequiresMovement>\n"
+    , "    <raiseOnFocus>" ++ renderRcBool (rcRaiseOnFocus config) ++ "</raiseOnFocus>\n"
+    , "    <raiseOnFocusDelay>" ++ show (rcRaiseOnFocusDelayMs config) ++ "</raiseOnFocusDelay>\n"
     , "  </focus>\n"
     , "  <theme>\n"
     , "    <name>" ++ escapeXml (rcThemeName config) ++ "</name>\n"
@@ -101,3 +103,9 @@ renderWorkspaceName workspace =
 renderKeybindXml :: String -> String
 renderKeybindXml keybindXml =
   ensureTrailingNewline keybindXml
+
+renderRcBool :: Bool -> String
+renderRcBool value =
+  if value
+    then "yes"
+    else "no"

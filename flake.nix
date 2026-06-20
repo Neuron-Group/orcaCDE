@@ -115,6 +115,7 @@
             "src/nscde_paneld/wlr-layer-shell-unstable-v1-protocol.c"
             "src/nscde_paneld/xdg-shell-protocol.c"
             "src/nscde_wayland_common/panel-layout-contract.c"
+            "src/nscde_wayland_common/runtime-client.c"
           ];
           buildInputs = [
             pkgs.cairo
@@ -302,11 +303,14 @@ EOF
           name = "nscde-wayland-runtime-check";
           runtimeInputs = [
             runtimePkg
+            launcherPkg
             pkgs.coreutils
             pkgs.gnugrep
           ];
           text = ''
             export NSCDE_RUNTIME_BIN="${runtimePkg}/bin/nscde-runtime"
+            export NSCDE_RUNTIME_ROOT="${./.}"
+            export NSCDE_RUNTIME_TOOLSDIR="${launcherPkg}/libexec/nscde/tools"
             export NSCDE_STATIC_PANEL_LAYOUT_FILE="${referencePanelLayoutFile}"
             export NSCDE_STATIC_SESSION_ENV_FILE="${referenceSessionEnvFile}"
             exec ${./tools/check-runtime.sh}
@@ -390,10 +394,13 @@ EOF
           runtime-check = pkgs.runCommand "nscde-wayland-runtime-check" {
             nativeBuildInputs = [
               runtimePkg
+              launcherPkg
               pkgs.coreutils
               pkgs.gnugrep
             ];
             NSCDE_RUNTIME_BIN = "${runtimePkg}/bin/nscde-runtime";
+            NSCDE_RUNTIME_ROOT = ./.;
+            NSCDE_RUNTIME_TOOLSDIR = "${launcherPkg}/libexec/nscde/tools";
             NSCDE_STATIC_PANEL_LAYOUT_FILE = referencePanelLayoutFile;
             NSCDE_STATIC_SESSION_ENV_FILE = referenceSessionEnvFile;
           } ''

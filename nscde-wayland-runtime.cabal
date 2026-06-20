@@ -10,26 +10,36 @@ library
     , NsCDE.Backend.Labwc.MenuXml
     , NsCDE.Backend.Labwc.RcXml
     , NsCDE.Backend.Labwc.SessionFiles
+    , NsCDE.Backend.Labwc.StyleApply
+    , NsCDE.Backend.Labwc.Theme
     , NsCDE.Domain.Keybinds
     , NsCDE.Domain.Menu
+    , NsCDE.Domain.Palette
     , NsCDE.Domain.PanelLayout
     , NsCDE.Domain.Runtime
     , NsCDE.Domain.Session
+    , NsCDE.Domain.Style
     , NsCDE.Foundation.Common
     , NsCDE.Foundation.EnvFile
     , NsCDE.Foundation.Paths
     , NsCDE.Foundation.Settings
+    , NsCDE.Integration.MotifColors
     , NsCDE.Parse.AppMenus
     , NsCDE.Parse.Keybindings
     , NsCDE.Parse.PaletteDp
+    , NsCDE.Parse.StyleMgrIni
+    , NsCDE.Parse.StyleState
     , NsCDE.Parse.Subpanels
+    , NsCDE.Policy.Backdrop
     , NsCDE.Policy.Keybinds
     , NsCDE.Policy.Menu
     , NsCDE.Policy.PanelLayout
     , NsCDE.Policy.SessionPlan
+    , NsCDE.Policy.StyleApply
     , NsCDE.Runtime.Daemon
     , NsCDE.Runtime.Protocol
     , NsCDE.Runtime.State
+    , NsCDE.Store.StyleState
   build-depends:
       base >=4.14 && <5
     , network

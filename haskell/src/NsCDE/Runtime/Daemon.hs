@@ -4,24 +4,70 @@ module NsCDE.Runtime.Daemon
   , runQuery
   ) where
 
-import Control.Concurrent (MVar, forkIO, modifyMVar, modifyMVar_, newMVar, readMVar, threadDelay)
-import Control.Exception (bracket, finally)
+import Control.Concurrent
+  ( Chan
+  , MVar
+  , forkIO
+  , modifyMVar
+  , modifyMVar_
+  , newChan
+  , newMVar
+  , readChan
+  , readMVar
+  , threadDelay
+  , writeChan
+  )
+import Control.Exception (finally)
 import Control.Monad (forever, void, when)
 import Network.Socket
 import System.Directory (createDirectoryIfMissing, removeFile)
 import System.Environment (getEnvironment)
 import System.Exit (exitFailure)
-import System.IO (BufferMode(..), IOMode(ReadWriteMode), hClose, hPutStrLn, hSetBuffering, stderr)
+import System.IO
+  ( BufferMode(..)
+  , Handle
+  , IOMode(ReadWriteMode)
+  , hClose
+  , hPutStrLn
+  , hSetBuffering
+  , stderr
+  )
 import System.IO.Error (catchIOError)
-import System.Posix.IO (OpenFileFlags(..), OpenMode(ReadOnly), closeFd, defaultFileFlags, fdRead, openFd)
+import System.Posix.IO
+  ( OpenFileFlags(..)
+  , OpenMode(ReadOnly)
+  , closeFd
+  , defaultFileFlags
+  , fdRead
+  , openFd
+  )
 import System.Posix.Process (getProcessID)
 import System.Posix.Types (ProcessID)
 
 import NsCDE.Domain.Runtime
 import NsCDE.Foundation.EnvFile (KeyValue, renderEnvFile)
-import NsCDE.Foundation.Paths (RuntimePaths, resolveRuntimePaths, runtimeCommandFifo, runtimePidFile, runtimeSocketFile, runtimeStateDir)
+import NsCDE.Foundation.Paths
+  ( RuntimePaths
+  , resolveRuntimePaths
+  , runtimeCommandFifo
+  , runtimePidFile
+  , runtimeSocketFile
+  , runtimeStateDir
+  )
 import NsCDE.Runtime.Protocol
 import NsCDE.Runtime.State
+
+data ServerState = ServerState
+  { serverRuntimeState :: RuntimeState
+  , serverNextSubscriberId :: Int
+  , serverSubscribers :: [Subscriber]
+  }
+
+data Subscriber = Subscriber
+  { subscriberId :: Int
+  , subscriberTopics :: [RuntimeTopic]
+  , subscriberQueue :: Chan RuntimeResponse
+  }
 
 runDaemon :: IO ()
 runDaemon = do
@@ -34,7 +80,7 @@ runDaemon = do
   cleanupSocket (runtimeSocketFile (runtimePaths runtimeState))
   withSocketsDo $
     bracketSocket (runtimeSocketFile (runtimePaths runtimeState)) $ \serverSocket -> do
-      stateVar <- newMVar runtimeState
+      stateVar <- newMVar (ServerState runtimeState 1 [])
       void (forkIO (fifoLoop stateVar))
       forever $ do
         (clientSocket, _) <- accept serverSocket
@@ -73,35 +119,129 @@ runQuery topic = do
         fallbackQuery env topic
   putStr (renderEnvFile entries)
 
-handleClient :: MVar RuntimeState -> Socket -> IO ()
-handleClient stateVar clientSocket =
-  bracket (socketToHandle clientSocket ReadWriteMode) hClose $ \handle -> do
-    hSetBuffering handle LineBuffering
-    requestFrame <- readFrame handle
-    response <-
-      case decodeRequest requestFrame of
-        Left message -> pure (ResponseError message)
-        Right request ->
-          case request of
-            RequestHello maybeRole ->
-              pure (ResponseAck ("hello" ++ maybe "" (" " ++) maybeRole))
-            RequestSubscribe _ ->
-              pure (ResponseError "subscribe is not implemented yet")
-            RequestQuery topic -> do
-              runtimeState <- readMVar stateVar
-              ResponseState topic <$> queryTopicEntries runtimeState topic
-            RequestCommand command -> do
-              message <- modifyMVar stateVar $ \runtimeState -> do
-                (updatedState, message) <- handleRuntimeCommand command runtimeState
-                writeCompatibilityOutputs updatedState
-                pure (updatedState, message)
-              pure (ResponseAck message)
-    writeFrame handle (encodeResponse response)
+handleClient :: MVar ServerState -> Socket -> IO ()
+handleClient stateVar clientSocket = do
+  handle <- socketToHandle clientSocket ReadWriteMode
+  hSetBuffering handle LineBuffering
+  requestFrame <- readFrame handle
+  case decodeRequest requestFrame of
+    Left message -> do
+      writeFrame handle (encodeResponse (ResponseError message))
+      hClose handle
+    Right request ->
+      case request of
+        RequestSubscribe topics ->
+          handleSubscription stateVar handle topics
+        _ -> do
+          response <- handleRequest stateVar request
+          writeFrame handle (encodeResponse response)
+          hClose handle
 
-fifoLoop :: MVar RuntimeState -> IO ()
+handleRequest :: MVar ServerState -> RuntimeRequest -> IO RuntimeResponse
+handleRequest stateVar request =
+  case request of
+    RequestHello maybeRole ->
+      pure (ResponseAck ("hello" ++ maybe "" (" " ++) maybeRole))
+    RequestSubscribe _ ->
+      pure (ResponseError "subscribe requests must use the persistent socket path")
+    RequestQuery topic -> do
+      serverState <- readMVar stateVar
+      ResponseState topic <$> queryTopicEntries (serverRuntimeState serverState) topic
+    RequestCommand command -> do
+      (changedTopics, message) <- modifyMVar stateVar $ \serverState -> do
+        (updatedRuntimeState, updatedTopics, updatedMessage) <-
+          handleRuntimeCommand command (serverRuntimeState serverState)
+        writeCompatibilityOutputs updatedRuntimeState
+        pure
+          ( serverState {serverRuntimeState = updatedRuntimeState}
+          , (updatedTopics, updatedMessage)
+          )
+      broadcastTopics stateVar changedTopics
+      pure (ResponseAck message)
+
+handleSubscription :: MVar ServerState -> Handle -> [RuntimeTopic] -> IO ()
+handleSubscription stateVar handle requestedTopics =
+  if null topics
+    then do
+      writeFrame handle (encodeResponse (ResponseError "subscribe requires at least one topic"))
+      hClose handle
+    else do
+      queue <- newChan
+      subscriberKey <- modifyMVar stateVar $ \serverState -> do
+        let nextKey = serverNextSubscriberId serverState
+            subscriber = Subscriber nextKey topics queue
+        pure
+          ( serverState
+              { serverNextSubscriberId = nextKey + 1
+              , serverSubscribers = subscriber : serverSubscribers serverState
+              }
+          , nextKey
+          )
+      catchIOError
+        (do
+          serverState <- readMVar stateVar
+          sendInitialState handle topics (serverRuntimeState serverState)
+          forever $ do
+            response <- readChan queue
+            writeFrame handle (encodeResponse response))
+        (\_ -> pure ())
+        `finally` (removeSubscriber stateVar subscriberKey >> hClose handle)
+  where
+    topics = uniqueTopics requestedTopics
+
+sendInitialState :: Handle -> [RuntimeTopic] -> RuntimeState -> IO ()
+sendInitialState handle topics runtimeState =
+  mapM_
+    (\topic -> do
+      entries <- queryTopicEntries runtimeState topic
+      writeFrame handle (encodeResponse (ResponseState topic entries)))
+    topics
+
+removeSubscriber :: MVar ServerState -> Int -> IO ()
+removeSubscriber stateVar subscriberKey =
+  modifyMVar_ stateVar $ \serverState ->
+    pure
+      serverState
+        { serverSubscribers =
+            filter ((/= subscriberKey) . subscriberId) (serverSubscribers serverState)
+        }
+
+broadcastTopics :: MVar ServerState -> [RuntimeTopic] -> IO ()
+broadcastTopics stateVar changedTopics =
+  when (not (null topics)) $ do
+    serverState <- readMVar stateVar
+    let runtimeState = serverRuntimeState serverState
+        subscribers = serverSubscribers serverState
+    mapM_ (broadcastTopic runtimeState subscribers) topics
+  where
+    topics = uniqueTopics changedTopics
+
+broadcastTopic :: RuntimeState -> [Subscriber] -> RuntimeTopic -> IO ()
+broadcastTopic runtimeState subscribers topic = do
+  entries <- queryTopicEntries runtimeState topic
+  let response = ResponseState topic entries
+  mapM_
+    (\subscriber ->
+      when (subscriberWantsTopic topic subscriber) $
+        writeChan (subscriberQueue subscriber) response)
+    subscribers
+
+subscriberWantsTopic :: RuntimeTopic -> Subscriber -> Bool
+subscriberWantsTopic topic subscriber =
+  any (== topic) (subscriberTopics subscriber)
+
+uniqueTopics :: [RuntimeTopic] -> [RuntimeTopic]
+uniqueTopics =
+  foldr insertTopic []
+  where
+    insertTopic topic acc
+      | topic `elem` acc = acc
+      | otherwise = topic : acc
+
+fifoLoop :: MVar ServerState -> IO ()
 fifoLoop stateVar = do
-  runtimeState <- readMVar stateVar
-  let fifoPath = runtimeCommandFifo (runtimePaths runtimeState)
+  serverState <- readMVar stateVar
+  let fifoPath = runtimeCommandFifo (runtimePaths (serverRuntimeState serverState))
   fd <- openFd fifoPath ReadOnly defaultFileFlags {nonBlock = True}
   loop fd ""
   where
@@ -110,8 +250,8 @@ fifoLoop stateVar = do
       case readResult of
         Nothing -> do
           closeFd fd
-          runtimeState <- readMVar stateVar
-          let fifoPath = runtimeCommandFifo (runtimePaths runtimeState)
+          serverState <- readMVar stateVar
+          let fifoPath = runtimeCommandFifo (runtimePaths (serverRuntimeState serverState))
           newFd <- openFd fifoPath ReadOnly defaultFileFlags {nonBlock = True}
           loop newFd leftover
         Just (chunk, _) -> do
@@ -121,12 +261,17 @@ fifoLoop stateVar = do
           mapM_ (applyCompatLine stateVar) completeLines
           loop fd nextLeftover
 
-applyCompatLine :: MVar RuntimeState -> String -> IO ()
-applyCompatLine stateVar rawLine =
-  modifyMVar_ stateVar $ \runtimeState -> do
-    (updatedState, _) <- handleCompatCommandLine rawLine runtimeState
-    writeCompatibilityOutputs updatedState
-    pure updatedState
+applyCompatLine :: MVar ServerState -> String -> IO ()
+applyCompatLine stateVar rawLine = do
+  changedTopics <- modifyMVar stateVar $ \serverState -> do
+    (updatedRuntimeState, updatedTopics, _) <-
+      handleCompatCommandLine rawLine (serverRuntimeState serverState)
+    writeCompatibilityOutputs updatedRuntimeState
+    pure
+      ( serverState {serverRuntimeState = updatedRuntimeState}
+      , updatedTopics
+      )
+  broadcastTopics stateVar changedTopics
 
 requestServer :: RuntimePaths -> [KeyValue] -> IO (Maybe [KeyValue])
 requestServer paths requestFrame =
@@ -170,6 +315,15 @@ commandFrame command =
     CommandReload ->
       [ ("TYPE", "command")
       , ("NAME", "reload")
+      ]
+    CommandStyleSet styleEntries applyNow ->
+      [ ("TYPE", "command")
+      , ("NAME", "style-set")
+      , ("APPLY", if applyNow then "1" else "0")
+      ] ++ styleEntries
+    CommandStyleApply ->
+      [ ("TYPE", "command")
+      , ("NAME", "style-apply")
       ]
     CommandWindow windowCommand windowId ->
       [ ("TYPE", "command")

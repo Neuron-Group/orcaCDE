@@ -139,6 +139,10 @@ struct nscde_panel_layout_contract {
 }
 
 bool
+nscde_panel_layout_contract_parse_contents(const char *contents,
+	struct nscde_panel_layout_contract *layout);
+
+bool
 nscde_panel_layout_contract_parse_file(const char *path,
 	struct nscde_panel_layout_contract *layout);
 

@@ -88,6 +88,14 @@ decodeCommand frame =
                (lookupText frame "NEW" "")))
        "reload" ->
          Right (RequestCommand CommandReload)
+       "style-set" ->
+         Right
+           (RequestCommand
+             (CommandStyleSet
+               (styleSetEntries frame)
+               (lookupText frame "APPLY" "0" == "1")))
+       "style-apply" ->
+         Right (RequestCommand CommandStyleApply)
        _ | "window-" `isPrefixOf` commandName ->
              case parseRuntimeWindowCommand (drop (length ("window-" :: String)) commandName) of
                Just windowCommand ->
@@ -107,6 +115,13 @@ mapMaybe fn (value:rest) =
   case fn value of
     Just result -> result : mapMaybe fn rest
     Nothing -> mapMaybe fn rest
+
+styleSetEntries :: [KeyValue] -> [KeyValue]
+styleSetEntries =
+  filter keepEntry
+  where
+    keepEntry (key, _) =
+      key /= "TYPE" && key /= "NAME" && key /= "APPLY"
 
 isPrefixOf :: Eq a => [a] -> [a] -> Bool
 isPrefixOf [] _ = True

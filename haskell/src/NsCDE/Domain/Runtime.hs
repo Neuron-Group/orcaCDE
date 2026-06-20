@@ -2,6 +2,7 @@ module NsCDE.Domain.Runtime
   ( RuntimeCommand(..)
   , RuntimeRequest(..)
   , RuntimeResponse(..)
+  , RuntimeStyleContext(..)
   , RuntimeTopic(..)
   , RuntimeWindowCommand(..)
   , parseRuntimeTopic
@@ -24,6 +25,7 @@ data RuntimeTopic
   | TopicPager
   | TopicTaskd
   | TopicCapabilities
+  | TopicStyle
   deriving (Eq, Show)
 
 data RuntimeWindowCommand
@@ -38,6 +40,8 @@ data RuntimeCommand
   = CommandWorkspaceSwitch String
   | CommandWorkspaceRename String String
   | CommandWindow RuntimeWindowCommand Int
+  | CommandStyleSet [KeyValue] Bool
+  | CommandStyleApply
   | CommandReload
   deriving (Eq, Show)
 
@@ -54,6 +58,31 @@ data RuntimeResponse
   | ResponseError String
   deriving (Eq, Show)
 
+data RuntimeStyleContext = RuntimeStyleContext
+  { runtimeStyleBackendName :: String
+  , runtimeStyleHomeDir :: FilePath
+  , runtimeStyleRootDir :: FilePath
+  , runtimeStyleDataDir :: FilePath
+  , runtimeStyleToolsDir :: FilePath
+  , runtimeStyleFvwmUserDir :: FilePath
+  , runtimeStyleXdgConfigHome :: FilePath
+  , runtimeStyleXdgCacheHome :: FilePath
+  , runtimeStyleXdgDataHome :: FilePath
+  , runtimeStyleXdgRuntimeDir :: FilePath
+  , runtimeStyleThemeName :: String
+  , runtimeStyleWorkspaces :: [String]
+  , runtimeStyleLabwcConfigDir :: FilePath
+  , runtimeStyleLabwcKeybindXmlFile :: FilePath
+  , runtimeStyleTitleFontName :: String
+  , runtimeStyleTitleFontSize :: String
+  , runtimeStyleTitleFontSlant :: String
+  , runtimeStyleTitleFontWeight :: String
+  , runtimeStyleWaylandDisplay :: String
+  , runtimeStyleDisplayName :: String
+  , runtimeStyleSystemPath :: FilePath
+  , runtimeStyleStateDir :: FilePath
+  } deriving (Eq, Show)
+
 renderRuntimeTopic :: RuntimeTopic -> String
 renderRuntimeTopic topic =
   case topic of
@@ -66,6 +95,7 @@ renderRuntimeTopic topic =
     TopicPager -> "pager"
     TopicTaskd -> "taskd"
     TopicCapabilities -> "capabilities"
+    TopicStyle -> "style"
 
 parseRuntimeTopic :: String -> Maybe RuntimeTopic
 parseRuntimeTopic rawTopic =
@@ -79,6 +109,7 @@ parseRuntimeTopic rawTopic =
     "pager" -> Just TopicPager
     "taskd" -> Just TopicTaskd
     "capabilities" -> Just TopicCapabilities
+    "style" -> Just TopicStyle
     _ -> Nothing
 
 renderRuntimeWindowCommand :: RuntimeWindowCommand -> String

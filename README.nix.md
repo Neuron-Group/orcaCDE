@@ -86,7 +86,7 @@ That keeps the split honest:
   extraction started from
 
 It is still a bootstrap because the launcher/session package still depends on
-`legacy-shims/` for theme/style/session compatibility glue. Those remaining
+`legacy-shims/` for style/session compatibility glue. Those remaining
 shell-era pieces still ship as `.in` templates because they need configure-style
 path substitution inside the standalone package build. The new tree already
 owns the runtime and packaged launcher closure, but not yet every compatibility
@@ -99,6 +99,9 @@ Concrete seams removed so far:
 - keybind generation is now owned by `nscde-runtime`; the launcher prefers the
   runtime publisher and `nscde_labwc_keybindgen` remains only as a compatibility
   wrapper
+- `themerc` generation is now owned by `nscde-runtime`; the launcher and
+  daemon-owned style apply path both use the runtime publisher and
+  `nscde_labwc_theme` remains only as a compatibility wrapper
 - session coordination is now owned by `nscde-runtime daemon`; the packaged
   launcher autostart starts the runtime daemon directly and
   `legacy-shims/nscde_sessiond` remains only as a compatibility wrapper

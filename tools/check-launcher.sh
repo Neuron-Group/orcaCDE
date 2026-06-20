@@ -32,6 +32,8 @@ NSCDE_LABWC_AUTOSTART_TERMINAL=0 \
 LABWC_CONFIG_DIR="$CONFIG_DIR/labwc-nscde"
 STATE_DIR="$CACHE_DIR/nscde-stage1"
 THEME_FILE="$DATA_DIR/themes/NsCDE-Stage1/labwc/themerc"
+THEME_MENU_ACTIVE_FILE="$DATA_DIR/themes/NsCDE-Stage1/labwc/menu-active.xpm"
+THEME_CLOSE_2X_FILE="$DATA_DIR/themes/NsCDE-Stage1/labwc/2x/close.xbm"
 
 test -s "$LABWC_CONFIG_DIR/rc.xml"
 test -s "$LABWC_CONFIG_DIR/menu.xml"
@@ -40,6 +42,8 @@ test -s "$LABWC_CONFIG_DIR/environment"
 test -s "$LABWC_CONFIG_DIR/shutdown"
 test -s "$STATE_DIR/panel-layout.env"
 test -s "$THEME_FILE"
+test -s "$THEME_MENU_ACTIVE_FILE"
+test -s "$THEME_CLOSE_2X_FILE"
 
 grep -q 'nscde_labwc_paneld' "$LABWC_CONFIG_DIR/autostart"
 grep -q 'nscde-runtime.*daemon' "$LABWC_CONFIG_DIR/autostart"

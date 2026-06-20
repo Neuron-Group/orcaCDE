@@ -1,6 +1,7 @@
 module NsCDE.Domain.Session
   ( RcConfig(..)
   , RcFont(..)
+  , RcInput(..)
   , SessionPlan(..)
   ) where
 
@@ -14,10 +15,19 @@ data RcFont = RcFont
   , rcFontWeight :: String
   } deriving (Eq, Show)
 
+data RcInput = RcInput
+  { rcInputThemeName :: String
+  , rcInputTitleFont :: RcFont
+  , rcInputWorkspaces :: [String]
+  , rcInputKeybindXml :: String
+  } deriving (Eq, Show)
+
 data RcConfig = RcConfig
   { rcThemeName :: String
-  , rcFollowMouse :: String
-  , rcRaiseOnFocus :: String
+  , rcFollowMouse :: Bool
+  , rcFollowMouseRequiresMovement :: Bool
+  , rcRaiseOnFocus :: Bool
+  , rcRaiseOnFocusDelayMs :: Int
   , rcFonts :: [RcFont]
   , rcWorkspaces :: [String]
   , rcKeybindXml :: String

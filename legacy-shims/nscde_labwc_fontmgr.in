@@ -21,28 +21,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+import nscde_runtime_client as runtime_client
 
-PALETTE_KEYS = [
-    "NSCDE_PALETTE_1",
-    "NSCDE_PALETTE_2",
-    "NSCDE_PALETTE_3",
-    "NSCDE_PALETTE_4",
-    "NSCDE_PALETTE_5",
-    "NSCDE_PALETTE_6",
-    "NSCDE_PALETTE_7",
-    "NSCDE_PALETTE_8",
-]
 
-DEFAULT_PALETTE = [
-    "#b7c1ca",
-    "#101010",
-    "#8a9baa",
-    "#4f5964",
-    "#355d84",
-    "#355d84",
-    "#6b7785",
-    "#e7e7e7",
-]
+DEFAULT_PALETTE = runtime_client.DEFAULT_PALETTE
 
 FONT_SLOTS = [
     ("VARIABLE_NORMAL_SMALL", "Variable Normal Small"),
@@ -69,39 +51,6 @@ PREVIEW_SLOTS = [
     ("MONOSPACED_NORMAL_MEDIUM", "Mono Regular"),
     ("MONOSPACED_BOLD_MEDIUM", "Mono Bold"),
 ]
-
-
-def env_path():
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1", "panel.env")
-
-
-def parse_env_file(path):
-    data = {}
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            data[key] = value
-    return data
-
-
-def read_palette(state):
-    palette = []
-    for key in PALETTE_KEYS:
-        color = state.get(key, "")
-        if color and color.startswith("#") and len(color) == 7:
-            palette.append(color)
-        else:
-            palette.append(None)
-    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
-
 
 def nscde_datadir():
     return os.environ.get("NSCDE_DATADIR", "/usr/share/NsCDE")
@@ -190,6 +139,17 @@ def xft_to_qfont(xft_str):
     if "Italic" in style or "Oblique" in style:
         qf.setItalic(True)
     return qf
+
+
+def fontset_style_values(fontset_name, fontset_fonts):
+    style_values = {
+        "NSCDE_FONTSET_NAME": fontset_name,
+    }
+    for key, value in fontset_fonts.items():
+        slot = fontset_key_to_slot(key)
+        if slot and value:
+            style_values["NSCDE_FONT_{}".format(slot)] = value
+    return style_values
 
 
 def build_stylesheet(pal):
@@ -329,6 +289,7 @@ class NsCDEFontMgr(QWidget):
         self.fontsets = find_fontsets()
         self.selected_fontset_path = None
         self.selected_fontset_fonts = {}
+        self.style_state = runtime_client.style_state()
         self.current_size_group = "MEDIUM"
 
         self._build_ui()
@@ -407,8 +368,8 @@ class NsCDEFontMgr(QWidget):
         main_layout.addWidget(frame)
 
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
-        pal = read_palette(state)
+        state = runtime_client.panel_state()
+        pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
@@ -423,6 +384,14 @@ class NsCDEFontMgr(QWidget):
                 self.fontset_list.addItem(item)
 
     def _detect_current_fontset(self):
+        current_name = self.style_state.get("NSCDE_FONTSET_NAME", "")
+        if current_name:
+            for i in range(self.fontset_list.count()):
+                item = self.fontset_list.item(i)
+                if item.text() == current_name:
+                    self.fontset_list.setCurrentItem(item)
+                    return
+
         toolsdir = nscde_toolsdir()
         env = dict(os.environ)
         env.setdefault("NSCDE_TOOLSDIR", toolsdir)
@@ -526,36 +495,19 @@ class NsCDEFontMgr(QWidget):
                 )
                 return
 
-            cmd = (
-                '. "{shlib}" && '
-                'nscde_style_record_fontset "{fontset}"'
-            ).format(
-                shlib=os.path.join(toolsdir, "style_managers.shlib"),
-                fontset=self.selected_fontset_path,
+            style_values = fontset_style_values(
+                fontset_name, self.selected_fontset_fonts
             )
-            try:
-                subprocess.run(
-                    ["ksh", "-c", cmd],
-                    capture_output=True,
-                    timeout=10,
-                    env=env,
-                )
-            except subprocess.TimeoutExpired:
-                pass
 
             if backend == "labwc":
-                apply_cmd = (
-                    '. "{shlib}" && nscde_style_backend_apply'
-                ).format(shlib=os.path.join(toolsdir, "style_managers.shlib"))
-                try:
-                    subprocess.run(
-                        ["ksh", "-c", apply_cmd],
-                        capture_output=True,
-                        timeout=30,
-                        env=env,
+                if not runtime_client.runtime_style_set(style_values, apply=True):
+                    QMessageBox.warning(
+                        self,
+                        "Apply Error",
+                        "Failed to update font state via the runtime daemon.",
                     )
-                except subprocess.TimeoutExpired:
-                    pass
+                    return
+                self.style_state = runtime_client.style_state()
 
         finally:
             self.apply_btn.setEnabled(True)

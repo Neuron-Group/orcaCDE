@@ -465,8 +465,17 @@ prepare_runtime()
    startup_log "keybindgen:done"
 
    startup_log "theme:start"
-   if [ -x "$NSCDE_TOOLSDIR/nscde_labwc_theme" ]; then
-      "$NSCDE_TOOLSDIR/nscde_labwc_theme" >/dev/null
+   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
+      if "$NSCDE_RUNTIME_BIN" labwc-theme publish >/dev/null 2>&1; then
+         startup_log "theme:runtime:done"
+      else
+         startup_log "theme:runtime:failed"
+      fi
+   elif [ -x "$NSCDE_TOOLSDIR/nscde_labwc_theme" ]; then
+      "$NSCDE_TOOLSDIR/nscde_labwc_theme" >/dev/null 2>&1 || true
+      startup_log "theme:shim:done"
+   else
+      startup_log "theme:missing"
    fi
    startup_log "theme:done"
 

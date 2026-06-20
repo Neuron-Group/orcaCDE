@@ -1,0 +1,222 @@
+#!@PYTHON@
+
+import os
+import socket
+import subprocess
+
+
+PALETTE_KEYS = [
+    "NSCDE_PALETTE_1",
+    "NSCDE_PALETTE_2",
+    "NSCDE_PALETTE_3",
+    "NSCDE_PALETTE_4",
+    "NSCDE_PALETTE_5",
+    "NSCDE_PALETTE_6",
+    "NSCDE_PALETTE_7",
+    "NSCDE_PALETTE_8",
+]
+
+DEFAULT_PALETTE = [
+    "#b7c1ca",
+    "#101010",
+    "#8a9baa",
+    "#4f5964",
+    "#355d84",
+    "#355d84",
+    "#6b7785",
+    "#e7e7e7",
+]
+
+
+def state_dir():
+    state = os.environ.get("NSCDE_STATE_DIR", "")
+    if state:
+        return state
+    cache_home = os.environ.get(
+        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
+    )
+    return os.path.join(cache_home, "nscde-stage1")
+
+
+def state_path(name):
+    return os.path.join(state_dir(), name)
+
+
+def panel_env_path():
+    return state_path("panel.env")
+
+
+def style_env_path():
+    return state_path("style.env")
+
+
+def workspaces_env_path():
+    return state_path("workspaces.env")
+
+
+def windows_env_path():
+    return state_path("windows.env")
+
+
+def pager_env_path():
+    return state_path("pager.env")
+
+
+def session_fifo_path():
+    return state_path("sessiond.fifo")
+
+
+def pager_fifo_path():
+    state = parse_env_file(workspaces_env_path())
+    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    state = parse_env_file(pager_env_path())
+    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    return state_path("pagerd.fifo")
+
+
+def toplevel_fifo_path():
+    state = query_state("windows", windows_env_path())
+    fifo = state.get("NSCDE_TASKD_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
+    return state_path("topleveld.fifo")
+
+
+def parse_env_file(path):
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as handle:
+        return parse_env_contents(handle.read())
+
+
+def parse_env_contents(contents):
+    data = {}
+    for line in contents.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        data[key] = value
+    return data
+
+
+def runtime_bin():
+    return os.environ.get("NSCDE_RUNTIME_BIN", "nscde-runtime")
+
+
+def runtime_socket_path():
+    return state_path("runtime.sock")
+
+
+def render_env_frame(entries):
+    return "".join("{}={}\n".format(key, value) for key, value in entries.items()) + "\n"
+
+
+def runtime_request_frame(entries):
+    try:
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.connect(runtime_socket_path())
+        client.sendall(render_env_frame(entries).encode("utf-8"))
+        chunks = []
+        while True:
+            chunk = client.recv(4096)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n\n" in chunk or b"\n\n" in b"".join(chunks):
+                break
+        client.close()
+    except (FileNotFoundError, OSError):
+        return {}
+
+    payload = b"".join(chunks).decode("utf-8", errors="replace")
+    frame_text = payload.split("\n\n", 1)[0]
+    return parse_env_contents(frame_text)
+
+
+def runtime_query_state(topic):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "query", topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    return parse_env_contents(result.stdout)
+
+
+def runtime_ctl(*args):
+    try:
+        result = subprocess.run(
+            [runtime_bin(), "ctl"] + list(args),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except (FileNotFoundError, OSError):
+        return False
+    return result.returncode == 0
+
+
+def runtime_style_set(style_values, apply=False):
+    frame = {
+        "TYPE": "command",
+        "NAME": "style-set",
+        "APPLY": "1" if apply else "0",
+    }
+    frame.update(style_values)
+    response = runtime_request_frame(frame)
+    return response.get("TYPE", "") == "ack"
+
+
+def runtime_style_apply():
+    response = runtime_request_frame({
+        "TYPE": "command",
+        "NAME": "style-apply",
+    })
+    return response.get("TYPE", "") == "ack"
+
+
+def query_state(topic, fallback_path=""):
+    state = runtime_query_state(topic)
+    if state:
+        return state
+    if fallback_path:
+        return parse_env_file(fallback_path)
+    return {}
+
+
+def panel_state():
+    return query_state("panel", panel_env_path())
+
+
+def style_state():
+    return query_state("style", style_env_path())
+
+
+def workspaces_state():
+    return query_state("workspaces", workspaces_env_path())
+
+
+def windows_state():
+    return query_state("windows", windows_env_path())
+
+
+def read_palette(state, palette_keys=PALETTE_KEYS, default_palette=DEFAULT_PALETTE):
+    palette = []
+    for key in palette_keys:
+        color = state.get(key, "")
+        if color and color.startswith("#") and len(color) == 7:
+            palette.append(color)
+        else:
+            palette.append(None)
+    return [p or d for p, d in zip(palette, default_palette)]

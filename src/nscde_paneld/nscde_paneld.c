@@ -5,10 +5,10 @@
  * proper panel surface with exclusive zone reservation. It replaces the
  * stage-one PyQt5 placeholder with a native C layer-shell implementation.
  *
- * Reads state from panel.env for palette, workspace and backend info.
- * State directory is monitored via inotify for instant updates; a 30s
- * watchdog timer provides a fallback safety net.
- * Writes workspace switch commands to the session command FIFO.
+ * Prefers runtime socket query/subscribe for panel state when available,
+ * with state-file/inotify fallback during the staged transition.
+ * Writes workspace switch commands through the runtime control path first,
+ * then falls back to the pager FIFO when needed.
  *
  * This file is a part of NsCDE - Not so Common Desktop Environment
  * Author: Hegel3DReloaded
@@ -38,6 +38,7 @@
 #include <pango/pangocairo.h>
 
 #include "../nscde_wayland_common/panel-layout-contract.h"
+#include "../nscde_wayland_common/runtime-client.h"
 #include "nscde-pixel-icon.h"
 #include "pool-buffer.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
@@ -295,6 +296,8 @@ static struct {
 	char panel_layout_env_path[PATH_MAX_LEN + 64];
 	char state_dir[PATH_MAX_LEN + 16];
 	char pager_fifo_path[PATH_MAX_LEN];
+	struct nscde_runtime_subscription runtime_subscription;
+	bool runtime_active;
 
 	struct nscde_panel_layout_contract layout;
 	int layout_left_area_width;   /* computed from launcher geometry */
@@ -314,6 +317,10 @@ static struct {
 	.launcher_count = 0,
 	.left_label = "NsCDE",
 	.right_label = "labwc",
+	.runtime_subscription = {
+		.fd = -1,
+	},
+	.runtime_active = false,
 	.layout = NSCDE_PANEL_LAYOUT_CONTRACT_DEFAULTS,
 	.layout_left_area_width = 0,  /* computed in rebuild_launchers */
 	.active_subpanel = -1,
@@ -412,6 +419,7 @@ static const struct motif_palette_slots default_palette_slots = {
 
 enum {
 	FD_WAYLAND,
+	FD_RUNTIME,
 	FD_INOTIFY,
 	FD_TIMER,
 	FD_SIGNAL,
@@ -421,6 +429,7 @@ enum {
 static struct pollfd pollfds[NR_FDS];
 static struct wl_pointer *panel_pointer;
 static struct wl_surface *pointer_focus_surface;
+typedef void (*state_contents_parser_fn)(const char *contents);
 
 /* Forward declarations */
 static void rebuild_launchers(void);
@@ -469,6 +478,21 @@ static void recalculate_panel_palettes(void);
 static void copy_rgba(double dst[4], const double src[4]);
 static void dispatch_wsm_slot_action(enum panel_hit_role role, uint32_t button);
 static void dispatch_panel_chrome_action(enum panel_hit_role role, uint32_t button);
+static char *read_text_file(const char *path);
+static char *duplicate_text(const char *text);
+static void parse_env_contents(const char *contents);
+static void parse_workspaces_env_contents(const char *contents);
+static void parse_subpanel_env_contents(const char *contents);
+static void parse_layout_env_contents(const char *contents);
+static void parse_all_state_files(void);
+static bool query_runtime_topic_and_parse(const char *topic,
+	state_contents_parser_fn parser);
+static void sync_state_from_best_source(void);
+static bool setup_runtime_subscription(void);
+static void teardown_runtime_subscription(void);
+static void apply_runtime_frame(const struct nscde_runtime_frame *frame);
+static void handle_runtime_subscription(void);
+static void refresh_state_transport(void);
 
 /* ---- Color parsing ---- */
 
@@ -598,18 +622,29 @@ recalculate_panel_palettes(void)
 /* ---- Env file parsing ---- */
 
 static void
-parse_env_file(void)
+parse_env_contents(const char *contents)
 {
-	FILE *f = fopen(panel.panel_env_path, "r");
-	if (!f) {
+	char *copy;
+	char *saveptr;
+	char *line;
+
+	if (!contents) {
 		return;
 	}
 
-	char line[STATE_LINE_LEN];
-	while (fgets(line, sizeof(line), f)) {
-		/* Strip newline */
+	copy = duplicate_text(contents);
+	if (!copy) {
+		return;
+	}
+
+	snprintf(panel.right_label, sizeof(panel.right_label), "Backend: labwc");
+
+	saveptr = NULL;
+	for (line = strtok_r(copy, "\n", &saveptr);
+		line;
+		line = strtok_r(NULL, "\n", &saveptr)) {
 		size_t len = strlen(line);
-		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+		while (len > 0 && line[len - 1] == '\r') {
 			line[--len] = '\0';
 		}
 		if (len == 0 || line[0] == '#') {
@@ -664,24 +699,47 @@ parse_env_file(void)
 			}
 		}
 	}
-	fclose(f);
+	free(copy);
 	recalculate_panel_palettes();
 	panel.dirty = true;
 	request_render();
 }
 
 static void
-parse_workspaces_env_file(void)
+parse_env_file(void)
 {
-	FILE *f = fopen(panel.workspaces_env_path, "r");
-	if (!f) {
+	char *contents = read_text_file(panel.panel_env_path);
+
+	if (!contents) {
 		return;
 	}
 
-	char line[STATE_LINE_LEN];
-	while (fgets(line, sizeof(line), f)) {
+	parse_env_contents(contents);
+	free(contents);
+}
+
+static void
+parse_workspaces_env_contents(const char *contents)
+{
+	char *copy;
+	char *saveptr;
+	char *line;
+
+	if (!contents) {
+		return;
+	}
+
+	copy = duplicate_text(contents);
+	if (!copy) {
+		return;
+	}
+
+	saveptr = NULL;
+	for (line = strtok_r(copy, "\n", &saveptr);
+		line;
+		line = strtok_r(NULL, "\n", &saveptr)) {
 		size_t len = strlen(line);
-		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+		while (len > 0 && line[len - 1] == '\r') {
 			line[--len] = '\0';
 		}
 		if (len == 0 || line[0] == '#') {
@@ -720,18 +778,39 @@ parse_workspaces_env_file(void)
 			}
 		}
 	}
-	fclose(f);
+	free(copy);
 	panel.dirty = true;
 	request_render();
+}
+
+static void
+parse_workspaces_env_file(void)
+{
+	char *contents = read_text_file(panel.workspaces_env_path);
+
+	if (!contents) {
+		return;
+	}
+
+	parse_workspaces_env_contents(contents);
+	free(contents);
 }
 
 /* ---- Subpanel env file parsing ---- */
 
 static void
-parse_subpanel_env_file(void)
+parse_subpanel_env_contents(const char *contents)
 {
-	FILE *f = fopen(panel.subpanel_env_path, "r");
-	if (!f) {
+	char *copy;
+	char *saveptr;
+	char *line;
+
+	if (!contents) {
+		return;
+	}
+
+	copy = duplicate_text(contents);
+	if (!copy) {
 		return;
 	}
 
@@ -744,12 +823,14 @@ parse_subpanel_env_file(void)
 	}
 	panel.subpanel_count = 0;
 
-	char line[STATE_LINE_LEN];
 	int max_enabled = 0;
 
-	while (fgets(line, sizeof(line), f)) {
+	saveptr = NULL;
+	for (line = strtok_r(copy, "\n", &saveptr);
+		line;
+		line = strtok_r(NULL, "\n", &saveptr)) {
 		size_t len = strlen(line);
-		while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+		while (len > 0 && line[len - 1] == '\r') {
 			line[--len] = '\0';
 		}
 		if (len == 0 || line[0] == '#') {
@@ -835,7 +916,7 @@ parse_subpanel_env_file(void)
 			}
 		}
 	}
-	fclose(f);
+	free(copy);
 
 	panel.subpanel_count = max_enabled;
 
@@ -855,6 +936,19 @@ parse_subpanel_env_file(void)
 
 	panel.dirty = true;
 	request_render();
+}
+
+static void
+parse_subpanel_env_file(void)
+{
+	char *contents = read_text_file(panel.subpanel_env_path);
+
+	if (!contents) {
+		return;
+	}
+
+	parse_subpanel_env_contents(contents);
+	free(contents);
 }
 
 static void
@@ -879,9 +973,9 @@ recompute_panel_dimensions(void)
 }
 
 static void
-parse_layout_env_file(void)
+parse_layout_env_contents(const char *contents)
 {
-	if (!nscde_panel_layout_contract_parse_file(panel.panel_layout_env_path,
+	if (!nscde_panel_layout_contract_parse_contents(contents,
 		&panel.layout)) {
 		return;
 	}
@@ -890,6 +984,158 @@ parse_layout_env_file(void)
 	recompute_panel_dimensions();
 	panel.dirty = true;
 	request_render();
+}
+
+static void
+parse_layout_env_file(void)
+{
+	char *contents = read_text_file(panel.panel_layout_env_path);
+
+	if (!contents) {
+		return;
+	}
+
+	parse_layout_env_contents(contents);
+	free(contents);
+}
+
+static void
+parse_all_state_files(void)
+{
+	parse_layout_env_file();
+	parse_env_file();
+	parse_workspaces_env_file();
+	parse_subpanel_env_file();
+}
+
+static bool
+query_runtime_topic_and_parse(const char *topic, state_contents_parser_fn parser)
+{
+	char *contents = NULL;
+
+	if (!topic || !parser) {
+		return false;
+	}
+	if (!nscde_runtime_query_topic(topic, &contents)) {
+		return false;
+	}
+
+	parser(contents);
+	free(contents);
+	return true;
+}
+
+static void
+sync_state_from_best_source(void)
+{
+	if (!query_runtime_topic_and_parse("panel-layout",
+		parse_layout_env_contents)) {
+		parse_layout_env_file();
+	}
+	if (!query_runtime_topic_and_parse("panel", parse_env_contents)) {
+		parse_env_file();
+	}
+	if (!query_runtime_topic_and_parse("workspaces",
+		parse_workspaces_env_contents)) {
+		parse_workspaces_env_file();
+	}
+	if (!query_runtime_topic_and_parse("subpanels",
+		parse_subpanel_env_contents)) {
+		parse_subpanel_env_file();
+	}
+}
+
+static bool
+setup_runtime_subscription(void)
+{
+	if (panel.runtime_active) {
+		return true;
+	}
+	if (!nscde_runtime_subscribe_topics(
+		"panel-layout,panel,workspaces,subpanels",
+		&panel.runtime_subscription)) {
+		return false;
+	}
+
+	pollfds[FD_RUNTIME].fd = panel.runtime_subscription.fd;
+	pollfds[FD_RUNTIME].events = POLLIN;
+	panel.runtime_active = true;
+	return true;
+}
+
+static void
+teardown_runtime_subscription(void)
+{
+	nscde_runtime_subscription_close(&panel.runtime_subscription);
+	pollfds[FD_RUNTIME].fd = -1;
+	pollfds[FD_RUNTIME].events = 0;
+	panel.runtime_active = false;
+}
+
+static void
+apply_runtime_frame(const struct nscde_runtime_frame *frame)
+{
+	if (!frame || frame->type != NSCDE_RUNTIME_FRAME_STATE ||
+		!frame->contents) {
+		return;
+	}
+
+	if (strcmp(frame->topic, "panel-layout") == 0) {
+		parse_layout_env_contents(frame->contents);
+	} else if (strcmp(frame->topic, "panel") == 0) {
+		parse_env_contents(frame->contents);
+	} else if (strcmp(frame->topic, "workspaces") == 0) {
+		parse_workspaces_env_contents(frame->contents);
+	} else if (strcmp(frame->topic, "subpanels") == 0) {
+		parse_subpanel_env_contents(frame->contents);
+	}
+}
+
+static void
+handle_runtime_subscription(void)
+{
+	for (;;) {
+		struct nscde_runtime_frame frame = {0};
+		enum nscde_runtime_read_result result =
+			nscde_runtime_subscription_read(&panel.runtime_subscription,
+				&frame);
+
+		if (result == NSCDE_RUNTIME_READ_FRAME) {
+			if (frame.type == NSCDE_RUNTIME_FRAME_ERROR) {
+				if (frame.message[0]) {
+					fprintf(stderr,
+						"nscde_paneld: runtime subscribe error: %s\n",
+						frame.message);
+				}
+				nscde_runtime_frame_destroy(&frame);
+				teardown_runtime_subscription();
+				parse_all_state_files();
+				break;
+			}
+			apply_runtime_frame(&frame);
+			nscde_runtime_frame_destroy(&frame);
+			continue;
+		}
+		if (result == NSCDE_RUNTIME_READ_CLOSED ||
+			result == NSCDE_RUNTIME_READ_ERROR) {
+			teardown_runtime_subscription();
+			parse_all_state_files();
+		}
+		break;
+	}
+}
+
+static void
+refresh_state_transport(void)
+{
+	if (panel.runtime_active) {
+		return;
+	}
+
+	sync_state_from_best_source();
+	if (setup_runtime_subscription()) {
+		handle_runtime_subscription();
+	}
 }
 
 /* ---- Launcher button management ---- */
@@ -3486,6 +3732,9 @@ static const struct wl_registry_listener registry_listener = {
 static void
 send_workspace_switch(const char *name)
 {
+	if (nscde_runtime_ctl_workspace_switch(name)) {
+		return;
+	}
 	if (!panel.pager_fifo_path[0]) {
 		return;
 	}
@@ -3524,6 +3773,7 @@ static void
 setup_paths(void)
 {
 	const char *data_dir = getenv("NSCDE_DATADIR");
+	const char *state_dir = getenv("NSCDE_STATE_DIR");
 	char resolved_data_dir[PATH_MAX_LEN];
 	if (data_dir && data_dir[0]) {
 		strncpy(resolved_data_dir, data_dir, sizeof(resolved_data_dir) - 1);
@@ -3542,20 +3792,28 @@ setup_paths(void)
 	}
 	nscde_pixel_icon_init(&panel.pixel_icons, resolved_data_dir);
 
-	const char *cache_home = getenv("XDG_CACHE_HOME");
-	if (!cache_home || !cache_home[0]) {
-		const char *home = getenv("HOME");
-		if (home) {
-			static char cache_fallback[PATH_MAX_LEN];
-			snprintf(cache_fallback, sizeof(cache_fallback),
-				"%s/.cache", home);
-			cache_home = cache_fallback;
+	if (state_dir && state_dir[0]) {
+		strncpy(panel.state_dir, state_dir, sizeof(panel.state_dir) - 1);
+		panel.state_dir[sizeof(panel.state_dir) - 1] = '\0';
+	} else {
+		const char *cache_home = getenv("XDG_CACHE_HOME");
+		if (!cache_home || !cache_home[0]) {
+			const char *home = getenv("HOME");
+			if (home) {
+				static char cache_fallback[PATH_MAX_LEN];
+				snprintf(cache_fallback, sizeof(cache_fallback),
+					"%s/.cache", home);
+				cache_home = cache_fallback;
+			}
+		}
+		if (cache_home) {
+			snprintf(panel.state_dir, sizeof(panel.state_dir),
+				"%s/nscde-stage1", cache_home);
+			panel.state_dir[sizeof(panel.state_dir) - 1] = '\0';
 		}
 	}
-	if (cache_home) {
-		snprintf(panel.state_dir, sizeof(panel.state_dir),
-			"%s/nscde-stage1", cache_home);
-		panel.state_dir[sizeof(panel.state_dir) - 1] = '\0';
+
+	if (panel.state_dir[0]) {
 		snprintf(panel.panel_env_path, sizeof(panel.panel_env_path),
 			"%s/panel.env", panel.state_dir);
 		panel.panel_env_path[sizeof(panel.panel_env_path) - 1] = '\0';
@@ -3578,6 +3836,80 @@ setup_paths(void)
 }
 
 /* ---- Inotify and watchdog timer ---- */
+
+static char *
+duplicate_text(const char *text)
+{
+	size_t len;
+	char *copy;
+
+	if (!text) {
+		return NULL;
+	}
+
+	len = strlen(text);
+	copy = malloc(len + 1);
+	if (!copy) {
+		return NULL;
+	}
+
+	memcpy(copy, text, len + 1);
+	return copy;
+}
+
+static char *
+read_text_file(const char *path)
+{
+	FILE *f;
+	size_t cap = 1024;
+	size_t len = 0;
+	char *contents;
+
+	f = fopen(path, "r");
+	if (!f) {
+		return NULL;
+	}
+
+	contents = malloc(cap);
+	if (!contents) {
+		fclose(f);
+		return NULL;
+	}
+
+	for (;;) {
+		size_t remaining = cap - len;
+		size_t bytes;
+
+		if (remaining < 2) {
+			char *grown;
+			cap *= 2;
+			grown = realloc(contents, cap);
+			if (!grown) {
+				free(contents);
+				fclose(f);
+				return NULL;
+			}
+			contents = grown;
+			remaining = cap - len;
+		}
+
+		bytes = fread(contents + len, 1, remaining - 1, f);
+		len += bytes;
+		if (bytes == 0) {
+			break;
+		}
+	}
+
+	if (ferror(f)) {
+		free(contents);
+		fclose(f);
+		return NULL;
+	}
+
+	contents[len] = '\0';
+	fclose(f);
+	return contents;
+}
 
 static void
 setup_inotify(void)
@@ -3664,14 +3996,15 @@ main(int argc, char *argv[])
 	for (int i = 0; i < NR_FDS; i++) {
 		pollfds[i].fd = -1;
 	}
+	nscde_runtime_subscription_init(&panel.runtime_subscription);
 
 	setup_paths();
 
 	/* Initial state read */
-	parse_layout_env_file();
-	parse_env_file();
-	parse_workspaces_env_file();
-	parse_subpanel_env_file();
+	sync_state_from_best_source();
+	if (setup_runtime_subscription()) {
+		handle_runtime_subscription();
+	}
 
 	/* Connect to Wayland */
 	panel.display = wl_display_connect(NULL);
@@ -3744,10 +4077,6 @@ main(int argc, char *argv[])
 
 	/* Initial render */
 	refresh_applet_state();
-	parse_layout_env_file();
-	parse_env_file();
-	parse_workspaces_env_file();
-	parse_subpanel_env_file();
 	render_and_commit();
 
 	/* Event loop */
@@ -3776,12 +4105,17 @@ main(int argc, char *argv[])
 			wl_display_cancel_read(panel.display);
 		}
 
+		if (pollfds[FD_RUNTIME].fd >= 0 &&
+			(pollfds[FD_RUNTIME].revents &
+			(POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
+			handle_runtime_subscription();
+		}
+
 		if (pollfds[FD_INOTIFY].revents & POLLIN) {
 			drain_inotify();
-			parse_layout_env_file();
-			parse_env_file();
-			parse_workspaces_env_file();
-			parse_subpanel_env_file();
+			if (!panel.runtime_active) {
+				parse_all_state_files();
+			}
 		}
 
 		if (pollfds[FD_TIMER].revents & POLLIN) {
@@ -3789,10 +4123,9 @@ main(int argc, char *argv[])
 			ssize_t n = read(pollfds[FD_TIMER].fd, &exp, sizeof(exp));
 			(void)n;
 			refresh_applet_state();
-			parse_layout_env_file();
-			parse_env_file();
-			parse_workspaces_env_file();
-			parse_subpanel_env_file();
+			if (!panel.runtime_active) {
+				refresh_state_transport();
+			}
 		}
 
 		if (pollfds[FD_SIGNAL].revents & POLLIN) {
@@ -3824,6 +4157,7 @@ main(int argc, char *argv[])
 	if (panel_pointer) {
 		wl_pointer_destroy(panel_pointer);
 	}
+	teardown_runtime_subscription();
 	nscde_pixel_icon_destroy(&panel.pixel_icons);
 	if (panel.display) {
 		wl_display_disconnect(panel.display);

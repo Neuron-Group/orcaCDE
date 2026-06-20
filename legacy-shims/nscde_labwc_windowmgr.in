@@ -1,7 +1,6 @@
 #!@PYTHON@
 
 import os
-import subprocess
 import sys
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
@@ -17,69 +16,12 @@ from PyQt5.QtWidgets import (
     QSlider,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
+import nscde_runtime_client as runtime_client
 
-PALETTE_KEYS = [
-    "NSCDE_PALETTE_1",
-    "NSCDE_PALETTE_2",
-    "NSCDE_PALETTE_3",
-    "NSCDE_PALETTE_4",
-    "NSCDE_PALETTE_5",
-    "NSCDE_PALETTE_6",
-    "NSCDE_PALETTE_7",
-    "NSCDE_PALETTE_8",
-]
-
-DEFAULT_PALETTE = [
-    "#b7c1ca",
-    "#101010",
-    "#8a9baa",
-    "#4f5964",
-    "#355d84",
-    "#355d84",
-    "#6b7785",
-    "#e7e7e7",
-]
-
-
-def env_path():
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1", "panel.env")
-
-
-def style_env_path():
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1", "style.env")
-
-
-def parse_env_file(path):
-    data = {}
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            data[key] = value
-    return data
-
-
-def read_palette(state):
-    palette = []
-    for key in PALETTE_KEYS:
-        color = state.get(key, "")
-        if color and color.startswith("#") and len(color) == 7:
-            palette.append(color)
-        else:
-            palette.append(None)
-    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+DEFAULT_PALETTE = runtime_client.DEFAULT_PALETTE
 
 
 def nscde_datadir():
@@ -262,7 +204,7 @@ class NsCDEWindowMgr(QWidget):
         self.setMinimumSize(520, 580)
 
         self.current_palette = list(DEFAULT_PALETTE)
-        self.style_state = parse_env_file(style_env_path())
+        self.style_state = runtime_client.style_state()
         self._changed = {}
 
         self._build_ui()
@@ -556,8 +498,8 @@ class NsCDEWindowMgr(QWidget):
         layout.addStretch()
 
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
-        pal = read_palette(state)
+        state = runtime_client.panel_state()
+        pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
@@ -669,116 +611,51 @@ class NsCDEWindowMgr(QWidget):
         QApplication.processEvents()
 
         try:
-            toolsdir = nscde_toolsdir()
-            backend = os.environ.get("NSCDE_BACKEND", "labwc")
-
-            env = dict(os.environ)
-            env.setdefault("NSCDE_TOOLSDIR", toolsdir)
-            env.setdefault("NSCDE_DATADIR", nscde_datadir())
-            env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
-            env.setdefault("NSCDE_BACKEND", backend)
-
-            shlib = os.path.join(toolsdir, "style_managers.shlib")
-            if not os.path.exists(shlib):
-                return
-
-            calls = []
-
-            focus = self._get_focus_policy()
-            calls.append('nscde_style_set_focus_policy "{}"'.format(focus))
-
             auto_raise = "1" if self.auto_raise_cb.isChecked() else "0"
-            calls.append('nscde_style_set_auto_raise "{}"'.format(auto_raise))
-
-            calls.append(
-                'nscde_style_set_raise_delay "{}"'.format(
-                    self.raise_delay_slider.value()
-                )
-            )
-
             raise_t = "1" if self.raise_transient_cb.isChecked() else "0"
-            calls.append('nscde_style_set_raise_transient "{}"'.format(raise_t))
-
             lower_t = "1" if self.lower_transient_cb.isChecked() else "0"
-            calls.append('nscde_style_set_lower_transient "{}"'.format(lower_t))
-
             stack_t = "1" if self.stack_transient_cb.isChecked() else "0"
-            calls.append('nscde_style_set_stack_transient "{}"'.format(stack_t))
-
-            calls.append(
-                'nscde_style_set_opaque_move "{}"'.format(
-                    self.opaque_move_slider.value()
-                )
-            )
-
-            calls.append(
-                'nscde_style_set_move_threshold "{}"'.format(
-                    self.move_threshold_slider.value()
-                )
-            )
-
             icon_place = "1" if self.icon_box_radio.isChecked() else "0"
-            calls.append('nscde_style_set_icon_placement "{}"'.format(icon_place))
-
-            calls.append(
-                'nscde_style_set_icon_fill "{}"'.format(self._get_icon_fill())
-            )
-
+            raise_fp = "1" if self.raise_fp_cb.isChecked() else "0"
+            pager_prev = "1" if self.pager_preview_cb.isChecked() else "0"
             def_size = self.def_icon_size_slider.value()
             max_size = self.max_icon_size_slider.value()
-            calls.append(
-                'nscde_style_set_icon_size "{},{},{},{}"'.format(
+
+            style_values = {
+                "NSCDE_FOCUS_POLICY": self._get_focus_policy(),
+                "NSCDE_AUTO_RAISE": auto_raise,
+                "NSCDE_RAISE_DELAY": str(self.raise_delay_slider.value()),
+                "NSCDE_RAISE_TRANSIENT": raise_t,
+                "NSCDE_LOWER_TRANSIENT": lower_t,
+                "NSCDE_STACK_TRANSIENT": stack_t,
+                "NSCDE_OPAQUE_MOVE": str(self.opaque_move_slider.value()),
+                "NSCDE_MOVE_THRESHOLD": str(self.move_threshold_slider.value()),
+                "NSCDE_ICON_PLACEMENT": icon_place,
+                "NSCDE_ICON_FILL": self._get_icon_fill(),
+                "NSCDE_ICON_SIZE": "{},{},{},{}".format(
                     def_size, def_size, max_size, max_size
-                )
-            )
-
-            raise_fp = "1" if self.raise_fp_cb.isChecked() else "0"
-            calls.append('nscde_style_set_raise_fp_on_page "{}"'.format(raise_fp))
-
-            pager_prev = "1" if self.pager_preview_cb.isChecked() else "0"
-            calls.append('nscde_style_set_pager_preview "{}"'.format(pager_prev))
-
-            calls.append(
-                'nscde_style_set_edge_thickness "{}"'.format(
-                    self._get_edge_thickness()
-                )
-            )
-
-            calls.append(
-                'nscde_style_set_edge_resistance "{}"'.format(
-                    self.edge_resistance_slider.value()
-                )
-            )
-
-            calls.append(
-                'nscde_style_set_edge_move_resistance "{}"'.format(
+                ),
+                "NSCDE_RAISE_FP_ON_PAGE": raise_fp,
+                "NSCDE_PAGER_PREVIEW": pager_prev,
+                "NSCDE_EDGE_THICKNESS": self._get_edge_thickness(),
+                "NSCDE_EDGE_RESISTANCE": str(self.edge_resistance_slider.value()),
+                "NSCDE_EDGE_MOVE_RESISTANCE": str(
                     self.edge_move_resistance_slider.value()
-                )
-            )
-
-            calls.append(
-                'nscde_style_set_edge_move_delay "{}"'.format(
+                ),
+                "NSCDE_EDGE_MOVE_DELAY": str(
                     self.edge_move_delay_slider.value()
+                ),
+            }
+
+            if not runtime_client.runtime_style_set(style_values, apply=True):
+                QMessageBox.warning(
+                    self,
+                    "Apply Error",
+                    "Failed to update window style via the runtime daemon.",
                 )
-            )
+                return
 
-            calls.append("nscde_style_backend_apply")
-
-            cmd = '. "{shlib}" && {calls}'.format(
-                shlib=shlib,
-                calls=" && ".join(calls),
-            )
-            try:
-                subprocess.run(
-                    ["ksh", "-c", cmd],
-                    capture_output=True,
-                    timeout=30,
-                    env=env,
-                )
-            except subprocess.TimeoutExpired:
-                pass
-
-            self.style_state = parse_env_file(style_env_path())
+            self.style_state = runtime_client.style_state()
 
         finally:
             self.apply_btn.setEnabled(True)

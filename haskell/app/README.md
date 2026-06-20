@@ -6,6 +6,7 @@ Current executable entrypoint:
   - `panel-layout publish [STATIC_PANEL_LAYOUT_FILE]`
   - `labwc-menu publish CONFIG_DIR`
   - `labwc-keybinds publish`
+  - `labwc-theme publish`
   - `labwc-rc publish CONFIG_DIR`
   - `labwc-session publish CONFIG_DIR`
 

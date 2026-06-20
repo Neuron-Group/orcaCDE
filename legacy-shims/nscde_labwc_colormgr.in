@@ -21,28 +21,10 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+import nscde_runtime_client as runtime_client
 
-PALETTE_KEYS = [
-    "NSCDE_PALETTE_1",
-    "NSCDE_PALETTE_2",
-    "NSCDE_PALETTE_3",
-    "NSCDE_PALETTE_4",
-    "NSCDE_PALETTE_5",
-    "NSCDE_PALETTE_6",
-    "NSCDE_PALETTE_7",
-    "NSCDE_PALETTE_8",
-]
 
-DEFAULT_PALETTE = [
-    "#b7c1ca",
-    "#101010",
-    "#8a9baa",
-    "#4f5964",
-    "#355d84",
-    "#355d84",
-    "#6b7785",
-    "#e7e7e7",
-]
+DEFAULT_PALETTE = runtime_client.DEFAULT_PALETTE
 
 PALETTE_COLOR_NAMES = [
     "Background",
@@ -68,38 +50,6 @@ def append_debug_log(title, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "a", encoding="utf-8") as handle:
         handle.write("== {} ==\n{}\n\n".format(title, text))
-
-
-def env_path():
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1", "panel.env")
-
-
-def parse_env_file(path):
-    data = {}
-    if not os.path.exists(path):
-        return data
-    with open(path, "r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            data[key] = value
-    return data
-
-
-def read_palette(state):
-    palette = []
-    for key in PALETTE_KEYS:
-        color = state.get(key, "")
-        if color and color.startswith("#") and len(color) == 7:
-            palette.append(color)
-        else:
-            palette.append(None)
-    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
 
 
 def nscde_datadir():
@@ -310,7 +260,8 @@ class NsCDEColorMgr(QWidget):
         self.current_palette = list(DEFAULT_PALETTE)
         self.palettes = find_palettes()
         self.selected_palette_path = None
-        self.ncolors = 8
+        self.style_state = runtime_client.style_state()
+        self.ncolors = self._current_color_mode()
 
         self._build_ui()
         self._apply_stylesheet()
@@ -368,7 +319,10 @@ class NsCDEColorMgr(QWidget):
 
         self.four_color_cb = QCheckBox("4 Colors")
         self.eight_color_cb = QCheckBox("8 Colors")
-        self.eight_color_cb.setChecked(True)
+        if self.ncolors == 4:
+            self.four_color_cb.setChecked(True)
+        else:
+            self.eight_color_cb.setChecked(True)
         self.four_color_cb.toggled.connect(self._on_four_color_toggled)
         self.eight_color_cb.toggled.connect(self._on_eight_color_toggled)
         ncolors_layout.addWidget(self.four_color_cb)
@@ -395,9 +349,12 @@ class NsCDEColorMgr(QWidget):
         frame_layout.addLayout(btn_layout)
         main_layout.addWidget(frame)
 
+    def _current_color_mode(self):
+        return 4 if self.style_state.get("NSCDE_COLOR_MODE", "8") == "4" else 8
+
     def _apply_stylesheet(self):
-        state = parse_env_file(env_path())
-        pal = read_palette(state)
+        state = runtime_client.panel_state()
+        pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
@@ -412,9 +369,25 @@ class NsCDEColorMgr(QWidget):
                 self.palette_list.addItem(item)
 
     def _detect_current_palette(self):
-        current_name = os.environ.get("NSCDE_PALETTE", "")
+        current_path = (
+            self.style_state.get("NSCDE_PALETTE_PATH", "")
+            or self.style_state.get("NSCDE_PALETTE_FILE", "")
+        )
+        current_name = self.style_state.get("NSCDE_PALETTE_NAME", "")
+
+        if current_path:
+            for i in range(self.palette_list.count()):
+                item = self.palette_list.item(i)
+                if item.data(Qt.UserRole) == current_path:
+                    self.palette_list.setCurrentItem(item)
+                    return
+
+        if not current_name:
+            current_name = os.environ.get("NSCDE_PALETTE", "")
+
         if not current_name:
             return
+
         for i in range(self.palette_list.count()):
             item = self.palette_list.item(i)
             if item.text() == current_name:
@@ -556,9 +529,6 @@ class NsCDEColorMgr(QWidget):
             self.apply_btn.setText("Apply")
 
     def _record_and_apply(self, palette_name):
-        toolsdir = nscde_toolsdir()
-        backend = os.environ.get("NSCDE_BACKEND", "labwc")
-
         palette_path = None
         user_pal = os.path.join(
             nscde_fvwm_userdir(), "palettes", "{}.dp".format(palette_name)
@@ -574,42 +544,31 @@ class NsCDEColorMgr(QWidget):
         if not palette_path:
             return
 
-        env = dict(os.environ)
-        env.setdefault("NSCDE_TOOLSDIR", toolsdir)
-        env.setdefault("NSCDE_DATADIR", nscde_datadir())
-        env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
-        env.setdefault("NSCDE_BACKEND", backend)
-        env["NSCDE_PALETTE_FILE"] = palette_path
+        style_values = {
+            "NSCDE_PALETTE_PATH": palette_path,
+            "NSCDE_PALETTE_FILE": palette_path,
+            "NSCDE_PALETTE_NAME": palette_name,
+            "NSCDE_COLOR_MODE": str(self.ncolors),
+            "NSCDE_FP_VARIANT": self.style_state.get("NSCDE_FP_VARIANT", "5"),
+        }
 
-        shlib = os.path.join(toolsdir, "style_managers.shlib")
-        if os.path.exists(shlib):
-            cmd = (
-                '. "{shlib}" && '
-                "nscde_style_record_palette \"{pal}\" \"{nc}\" && "
-                "nscde_style_backend_apply"
-            ).format(shlib=shlib, pal=palette_path, nc=self.ncolors)
-            try:
-                result = subprocess.run(
-                    ["ksh", "-c", cmd],
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    env=env,
-                )
-                if result.returncode != 0:
-                    err = result.stderr.strip() or result.stdout.strip() or (
-                        "backend apply exited with status {}".format(result.returncode)
-                    )
-                    append_debug_log(
-                        "colormgr apply",
-                        "cmd: {}\nrc: {}\nstdout:\n{}\nstderr:\n{}".format(
-                            cmd, result.returncode, result.stdout, result.stderr
-                        ),
-                    )
-                    QMessageBox.warning(self, "Apply Error", err)
-            except subprocess.TimeoutExpired:
-                append_debug_log("colormgr apply", "timeout running: {}".format(cmd))
-                QMessageBox.warning(self, "Apply Error", "Timed out while applying palette")
+        if not runtime_client.runtime_style_set(style_values, apply=True):
+            append_debug_log(
+                "colormgr apply",
+                "runtime style-set failed for palette {} ({})".format(
+                    palette_name, palette_path
+                ),
+            )
+            QMessageBox.warning(
+                self,
+                "Apply Error",
+                "Failed to update palette state via the runtime daemon.",
+            )
+            return
+
+        self.style_state = runtime_client.style_state()
+        self._apply_stylesheet()
+        self._detect_current_palette()
 
 
 def main():

@@ -1,7 +1,6 @@
 #!@PYTHON@
 
 import os
-import subprocess
 import sys
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import (
@@ -15,128 +14,9 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+import nscde_runtime_client as runtime_client
 
-PALETTE_KEYS = [
-    "NSCDE_PALETTE_1",
-    "NSCDE_PALETTE_2",
-    "NSCDE_PALETTE_3",
-    "NSCDE_PALETTE_4",
-    "NSCDE_PALETTE_5",
-    "NSCDE_PALETTE_6",
-    "NSCDE_PALETTE_7",
-    "NSCDE_PALETTE_8",
-]
-
-DEFAULT_PALETTE = [
-    "#b7c1ca",
-    "#101010",
-    "#8a9baa",
-    "#4f5964",
-    "#355d84",
-    "#355d84",
-    "#6b7785",
-    "#e7e7e7",
-]
-
-
-def state_dir():
-    state = os.environ.get("NSCDE_STATE_DIR", "")
-    if state:
-        return state
-    cache_home = os.environ.get(
-        "XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")
-    )
-    return os.path.join(cache_home, "nscde-stage1")
-
-
-def env_path():
-    return os.path.join(state_dir(), "panel.env")
-
-
-def workspaces_env_path():
-    return os.path.join(state_dir(), "workspaces.env")
-
-
-def pager_env_path():
-    return os.path.join(state_dir(), "pager.env")
-
-
-def session_fifo_path():
-    return os.path.join(state_dir(), "sessiond.fifo")
-
-
-def pager_fifo_path():
-    state = parse_env_file(workspaces_env_path())
-    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    state = parse_env_file(pager_env_path())
-    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    return os.path.join(state_dir(), "pagerd.fifo")
-
-
-def parse_env_file(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as handle:
-        return parse_env_contents(handle.read())
-
-
-def parse_env_contents(contents):
-    data = {}
-    for line in contents.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        data[key] = value
-    return data
-
-
-def runtime_bin():
-    return os.environ.get("NSCDE_RUNTIME_BIN", "nscde-runtime")
-
-
-def runtime_query_state(topic):
-    try:
-        result = subprocess.run(
-            [runtime_bin(), "query", topic],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-    except (FileNotFoundError, OSError):
-        return {}
-    if result.returncode != 0:
-        return {}
-    return parse_env_contents(result.stdout)
-
-
-def runtime_ctl(*args):
-    try:
-        result = subprocess.run(
-            [runtime_bin(), "ctl"] + list(args),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except (FileNotFoundError, OSError):
-        return False
-    return result.returncode == 0
-
-
-def read_palette(state):
-    palette = []
-    for key in PALETTE_KEYS:
-        color = state.get(key, "")
-        if color and color.startswith("#") and len(color) == 7:
-            palette.append(color)
-        else:
-            palette.append(None)
-    return [p or d for p, d in zip(palette, DEFAULT_PALETTE)]
+DEFAULT_PALETTE = runtime_client.DEFAULT_PALETTE
 
 
 def nscde_datadir():
@@ -239,7 +119,7 @@ def build_stylesheet(pal):
 
 
 def send_fifo_command(cmd):
-    fifo = session_fifo_path()
+    fifo = runtime_client.session_fifo_path()
     if not os.path.exists(fifo):
         return
     try:
@@ -251,7 +131,7 @@ def send_fifo_command(cmd):
 
 
 def send_pager_command(cmd):
-    fifo = pager_fifo_path()
+    fifo = runtime_client.pager_fifo_path()
     if not os.path.exists(fifo):
         return
     try:
@@ -263,21 +143,19 @@ def send_pager_command(cmd):
 
 
 def send_workspace_switch(workspace_name):
-    if runtime_ctl("workspace-switch", workspace_name):
+    if runtime_client.runtime_ctl("workspace-switch", workspace_name):
         return
     send_pager_command("switch_workspace:{}".format(workspace_name))
 
 
 def send_workspace_rename(old_name, new_name):
-    if runtime_ctl("workspace-rename", old_name, new_name):
+    if runtime_client.runtime_ctl("workspace-rename", old_name, new_name):
         return
     send_fifo_command("rename_workspace:{}:{}".format(old_name, new_name))
 
 
 def read_workspaces():
-    state = runtime_query_state("workspaces")
-    if not state:
-        state = parse_env_file(workspaces_env_path())
+    state = runtime_client.workspaces_state()
     ws_list = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
     count = int(state.get("NSCDE_WORKSPACE_COUNT", "4"))
     current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
@@ -375,10 +253,8 @@ class NsCDEWSM(QWidget):
         main_layout.addWidget(frame)
 
     def _apply_stylesheet(self):
-        state = runtime_query_state("panel")
-        if not state:
-            state = parse_env_file(env_path())
-        pal = read_palette(state)
+        state = runtime_client.panel_state()
+        pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 

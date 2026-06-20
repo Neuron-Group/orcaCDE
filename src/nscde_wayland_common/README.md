@@ -19,3 +19,9 @@ Current implemented slice:
   - shared parser/default contract for `panel-layout.env`
   - keeps the file-format boundary out of `nscde_paneld`-local code
   - lets Haskell/Nix publish one contract while C clients share the reader
+- `runtime-client.[ch]`
+  - shared Unix-socket query/control/subscribe helper for the standalone
+    runtime daemon
+  - keeps runtime protocol framing out of native client event loops
+  - supports staged migration from direct env/FIFO consumers to runtime-owned
+    state feeds

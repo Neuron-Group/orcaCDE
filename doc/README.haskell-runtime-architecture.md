@@ -125,9 +125,27 @@ The current extracted runtime now owns these render-time paths directly:
   - parsed `Keybindings.*` import
   - key/action translation
   - `labwc` keyboard fragment rendering
+- `themerc` and button glyph assets
+  - palette import plus Motif/CDE color derivation
+  - `labwc` theme file rendering
+  - compatibility glyph asset emission
 - `rc.xml`
   - typed theme/workspace/font/focus rendering
   - keybind fragment inclusion through `NSCDE_LABWC_KEYBIND_XML_FILE`
+- style apply for `labwc`
+  - daemon-owned `style.env` writes
+  - typed `StyleState` parsing for palette, front-panel variant, focus policy,
+    auto-raise, raise delay, transient/icon/page-edge settings, fonts, and
+    desk-1 backdrop selection
+  - policy-routed apply dispatch
+  - runtime-owned `rc.xml` regeneration during apply, rather than in-place XML
+    patching in shell-era helpers
+  - the current direct `labwc` apply surface is intentionally narrower than the
+    stored style schema: focus policy, auto-raise, and raise delay now feed the
+    generated `rc.xml`; transient handling, icon placement, and page-edge
+    settings are typed and stored for later backend-native ownership rather
+    than silently remaining shell-only
+  - theme, backdrop, toolkit font integration, and reload orchestration
 - `autostart`, `environment`, and `shutdown`
   - typed session-file planning and rendering
 - `nscde-runtime daemon`
@@ -144,6 +162,7 @@ The packaged launcher now prefers `nscde-runtime` for:
 - `panel-layout publish`
 - `labwc-menu publish`
 - `labwc-keybinds publish`
+- `labwc-theme publish`
 - `labwc-rc publish`
 - `labwc-session publish`
 - session coordination through `daemon`
@@ -168,6 +187,8 @@ Current verified handoff:
 - `runtime-check`, `launcher-check`, and `nix flake check` cover this
   transitional daemon-owned session path while native `C` clients still consume
   compatibility env files and FIFOs
+  - `runtime-check` now also covers the daemon-owned style-apply handoff for
+    `rc.xml`, theme, backdrop, and toolkit font updates
 
 ## Dependency graph
 
@@ -304,6 +325,9 @@ Suggested modules:
 
 - `Store.SessionState`
 - `Store.StyleState`
+  - currently owns normalized `style.env` reads/writes plus
+    `ResolvedStyleState`, which keeps palette path resolution and published
+    panel palette entries out of `Runtime.State`
 - `Store.WorkspaceState`
 - `Store.WindowState`
 - `Store.PanelState`
@@ -534,6 +558,8 @@ Publishes:
 `nscde-runtime style apply`
 
 - reads normalized style state
+- refreshes the daemon snapshot from `Store.StyleState` before publishing
+  follow-on state
 - regenerates required artifacts
 - republish panel/style views
 - requests compositor/helper reload
@@ -554,7 +580,10 @@ owners.
 Desired relationship:
 
 - `nscde_paneld`
-  - reads `panel.env`, `panel-layout.env`, `subpanels.env`
+  - now prefers runtime socket query/subscribe for `panel`, `panel-layout`,
+    `workspaces`, and `subpanels`
+  - keeps `panel.env`, `panel-layout.env`, and `subpanels.env` as staged
+    fallback inputs during the transition
   - renders and sends commands
   - does not decide layout policy
 - `nscde_pagerd`
@@ -570,6 +599,8 @@ Stage-one compatibility is allowed:
 
 - keep env-file publication while migrating
 - keep FIFO command format until the daemon stabilizes
+- let native helpers prefer the runtime socket first, with env/FIFO fallback
+  kept only as migration glue
 - later move event ingress to a clearer socket protocol if needed
 
 ## Immediate refactor of the current Haskell seed
@@ -589,6 +620,12 @@ Current modules should evolve as follows:
   - `Policy.SessionPlan`
   - `Backend.Labwc.RcXml`
   - `Backend.Labwc.SessionFiles`
+- `Runtime.State`
+  - keep daemon/state publication only
+  - consume resolved style snapshots from `Store.StyleState` rather than
+    reparsing raw style and palette files locally
+  - continue moving style-apply parsing and backend execution into
+    `Policy.StyleApply` and `Backend.Labwc.StyleApply`
 - `app/nscde-runtime.hs` -> thin dispatcher only
 
 Shared helper duplication currently present in `PanelLayout`, `LabwcMenu`, and
