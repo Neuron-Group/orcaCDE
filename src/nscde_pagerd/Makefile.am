@@ -10,6 +10,8 @@ machdepdir = $(NSCDE_TOOLSDIR)/$(OS_PLUS_MACHINE_ARCH)
 machdep_PROGRAMS = nscde_pagerd
 
 nscde_pagerd_SOURCES = nscde_pagerd.c \
+	../nscde_wayland_common/runtime-client.c \
+	../nscde_wayland_common/runtime-client.h \
 	ext-workspace-v1-client-protocol.h \
 	ext-workspace-v1-protocol.c
 

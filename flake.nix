@@ -132,6 +132,7 @@
           sources = [
             "src/nscde_pagerd/nscde_pagerd.c"
             "src/nscde_pagerd/ext-workspace-v1-protocol.c"
+            "src/nscde_wayland_common/runtime-client.c"
           ];
           extraFlags = [
             "$(pkg-config --cflags --libs wayland-client)"
@@ -142,6 +143,17 @@
           sources = [
             "src/nscde_toplevel/nscde_toplevel.c"
             "src/nscde_toplevel/wlr-foreign-toplevel-management-unstable-v1-protocol.c"
+            "src/nscde_wayland_common/runtime-client.c"
+          ];
+          extraFlags = [
+            "$(pkg-config --cflags --libs wayland-client)"
+          ];
+        };
+        backdropdPkg = buildNativeClient {
+          pname = "nscde_backdropd";
+          sources = [
+            "src/nscde_backdropd/nscde_backdropd.c"
+            "src/nscde_wayland_common/runtime-client.c"
           ];
           extraFlags = [
             "$(pkg-config --cflags --libs wayland-client)"
@@ -150,6 +162,7 @@
         nativeClientsPkg = pkgs.symlinkJoin {
           name = "nscde-wayland-clients";
           paths = [
+            backdropdPkg
             paneldPkg
             pagerdPkg
             toplevelPkg
@@ -284,6 +297,7 @@ EOF
             chmod +x "$out/bin/nscde_labwc_session"
 
             ln -s ${runtimePkg}/bin/nscde-runtime "$out/bin/nscde-runtime"
+            ln -s ${backdropdPkg}/bin/nscde_backdropd "$archdir/nscde_backdropd"
             ln -s ${paneldPkg}/bin/nscde_paneld "$archdir/nscde_paneld"
             ln -s ${pagerdPkg}/bin/nscde_pagerd "$archdir/nscde_pagerd"
             ln -s ${toplevelPkg}/bin/nscde_toplevel "$archdir/nscde_toplevel"
@@ -305,7 +319,11 @@ EOF
             runtimePkg
             launcherPkg
             pkgs.coreutils
+            pkgs.diffutils
+            pkgs.gawk
             pkgs.gnugrep
+            pkgs.gnused
+            pkgs.ksh
           ];
           text = ''
             export NSCDE_RUNTIME_BIN="${runtimePkg}/bin/nscde-runtime"
@@ -396,7 +414,11 @@ EOF
               runtimePkg
               launcherPkg
               pkgs.coreutils
+              pkgs.diffutils
+              pkgs.gawk
               pkgs.gnugrep
+              pkgs.gnused
+              pkgs.ksh
             ];
             NSCDE_RUNTIME_BIN = "${runtimePkg}/bin/nscde-runtime";
             NSCDE_RUNTIME_ROOT = ./.;

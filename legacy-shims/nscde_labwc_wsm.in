@@ -2,7 +2,7 @@
 
 import os
 import sys
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -200,14 +200,12 @@ class NsCDEWSM(QWidget):
         self._buttons = []
         self._rename_edit = None
         self._rename_target = None
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
         self._refresh_workspaces()
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._refresh_workspaces)
-        self._timer.start(2000)
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -258,8 +256,36 @@ class NsCDEWSM(QWidget):
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
-    def _refresh_workspaces(self):
-        names, current = read_workspaces()
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "workspaces"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic(
+            "workspaces", self._handle_workspaces_state
+        )
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_workspaces_state(self, state):
+        self._refresh_workspaces(state)
+
+    def _refresh_workspaces(self, state=None):
+        if state is None:
+            names, current = read_workspaces()
+        else:
+            names, current = read_workspaces_from_state(state)
 
         if self._rename_edit.isVisible():
             return
@@ -307,12 +333,29 @@ class NsCDEWSM(QWidget):
         self._rename_cancel.setVisible(False)
         self._rename_target = None
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
+
+def read_workspaces_from_state(state):
+    ws_list = state.get("NSCDE_WORKSPACES", "One,Two,Three,Four")
+    count = int(state.get("NSCDE_WORKSPACE_COUNT", "4"))
+    current = state.get("NSCDE_CURRENT_WORKSPACE", "One")
+    names = [n.strip() for n in ws_list.split(",") if n.strip()]
+    return names[:count], current
+
 
 def main():
     app = QApplication(sys.argv)
-    wsm = NsCDEWSM()
-    wsm.show()
-    sys.exit(app.exec_())
+    try:
+        wsm = NsCDEWSM()
+        wsm.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

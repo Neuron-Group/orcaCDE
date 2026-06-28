@@ -262,11 +262,13 @@ class NsCDEColorMgr(QWidget):
         self.selected_palette_path = None
         self.style_state = runtime_client.style_state()
         self.ncolors = self._current_color_mode()
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
         self._load_palette_list()
         self._detect_current_palette()
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -358,6 +360,33 @@ class NsCDEColorMgr(QWidget):
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "style"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic("style", self._handle_style_state)
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_style_state(self, state):
+        self.style_state = dict(state)
+        self.ncolors = self._current_color_mode()
+        self._sync_color_mode_controls()
+        self._update_swatch_visibility()
+        self._detect_current_palette()
+
     def _load_palette_list(self):
         self.palette_list.clear()
         seen = set()
@@ -436,6 +465,14 @@ class NsCDEColorMgr(QWidget):
             self.eight_color_cb.blockSignals(True)
             self.eight_color_cb.setChecked(True)
             self.eight_color_cb.blockSignals(False)
+
+    def _sync_color_mode_controls(self):
+        self.four_color_cb.blockSignals(True)
+        self.eight_color_cb.blockSignals(True)
+        self.four_color_cb.setChecked(self.ncolors == 4)
+        self.eight_color_cb.setChecked(self.ncolors != 4)
+        self.four_color_cb.blockSignals(False)
+        self.eight_color_cb.blockSignals(False)
 
     def _update_swatch_visibility(self):
         row = self.palette_list.currentRow()
@@ -570,12 +607,21 @@ class NsCDEColorMgr(QWidget):
         self._apply_stylesheet()
         self._detect_current_palette()
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
 
 def main():
     app = QApplication(sys.argv)
-    mgr = NsCDEColorMgr()
-    mgr.show()
-    sys.exit(app.exec_())
+    try:
+        mgr = NsCDEColorMgr()
+        mgr.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

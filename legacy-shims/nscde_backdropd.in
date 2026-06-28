@@ -1,7 +1,7 @@
 #!@KSH@
 
 #
-# Compatibility wrapper for one-shot runtime-owned backdrop apply.
+# NsCDE runtime-owned backdrop daemon wrapper for the labwc backend.
 #
 
 if [ -z "${OS_PLUS_MACHINE_ARCH:-}" ]; then
@@ -15,4 +15,4 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-exec "$BIN" --once "$@"
+exec "$BIN" "$@"

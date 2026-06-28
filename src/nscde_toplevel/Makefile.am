@@ -10,6 +10,8 @@ machdepdir = $(NSCDE_TOOLSDIR)/$(OS_PLUS_MACHINE_ARCH)
 machdep_PROGRAMS = nscde_toplevel
 
 nscde_toplevel_SOURCES = nscde_toplevel.c \
+	../nscde_wayland_common/runtime-client.c \
+	../nscde_wayland_common/runtime-client.h \
 	wlr-foreign-toplevel-management-unstable-v1-client-protocol.h \
 	wlr-foreign-toplevel-management-unstable-v1-protocol.c
 

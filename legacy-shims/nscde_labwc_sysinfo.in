@@ -147,9 +147,12 @@ class NsCDESysinfo(QWidget):
         self.setWindowTitle("System Information")
         self.setObjectName("NsCDESysinfo")
         self.setMinimumWidth(400)
+        self.current_palette = list(DEFAULT_PALETTE)
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -190,14 +193,43 @@ class NsCDESysinfo(QWidget):
     def _apply_stylesheet(self):
         state = runtime_client.panel_state()
         pal = runtime_client.read_palette(state)
+        self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
+
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
 
 
 def main():
     app = QApplication(sys.argv)
-    sysinfo = NsCDESysinfo()
-    sysinfo.show()
-    sys.exit(app.exec_())
+    try:
+        sysinfo = NsCDESysinfo()
+        sysinfo.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

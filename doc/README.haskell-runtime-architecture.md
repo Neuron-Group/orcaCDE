@@ -110,6 +110,9 @@ The top-level runtime shape should be:
    - legacy file parsing and migration helpers
 5. `nscde-runtime query ...`
    - stable read-side API for wrappers, tests, and native helper tooling
+6. `nscde-runtime subscribe ...`
+   - persistent socket stream for live state consumers
+   - primary event-driven read path for Qt clients and compatibility bridges
 
 ## Current implemented slice
 
@@ -136,7 +139,7 @@ The current extracted runtime now owns these render-time paths directly:
   - daemon-owned `style.env` writes
   - typed `StyleState` parsing for palette, front-panel variant, focus policy,
     auto-raise, raise delay, transient/icon/page-edge settings, fonts, and
-    desk-1 backdrop selection
+    per-desk backdrop selection
   - policy-routed apply dispatch
   - runtime-owned `rc.xml` regeneration during apply, rather than in-place XML
     patching in shell-era helpers
@@ -145,6 +148,10 @@ The current extracted runtime now owns these render-time paths directly:
     generated `rc.xml`; transient handling, icon placement, and page-edge
     settings are typed and stored for later backend-native ownership rather
     than silently remaining shell-only
+  - backdrop planning now includes runtime-owned default desk fallback derived
+    from the classic `NsCDE` backdrop cycle (`Ankh`, `BrickWall`, `Convex`,
+    `Toronto`) so a fresh standalone session still resolves a real asset path
+    before any user backdrop customization exists
   - theme, backdrop, toolkit font integration, and reload orchestration
 - `autostart`, `environment`, and `shutdown`
   - typed session-file planning and rendering
@@ -154,8 +161,8 @@ The current extracted runtime now owns these render-time paths directly:
   - publishes `session.env`, `panel.env`, `panel-layout.env`,
     `workspaces.env`, `pager.env`, `subpanels.env`, `capabilities`, and
     initial `windows.env` / `taskd.env`
-  - serves socket-based `ctl` / `query` requests and bridges current FIFO
-    compatibility commands for `pagerd` and `toplevel`
+  - serves socket-based `ctl`, `query`, and `subscribe` requests and bridges
+    current FIFO compatibility commands for `pagerd` and `toplevel`
 
 The packaged launcher now prefers `nscde-runtime` for:
 
@@ -176,12 +183,19 @@ The current compatibility shim boundary is:
   - no longer on the packaged launcher path
 - `nscde_sessiond`
   - now a compatibility wrapper that execs `nscde-runtime daemon`
-- `nscde_labwc_wsm`, `nscde_labwc_iconbox`, `nscde_labwc_sysaction`
-  - now runtime-first clients with env-file / FIFO fallback
+- `nscde_labwc_wsm`, `nscde_labwc_iconbox`, `nscde_labwc_colormgr`,
+  `nscde_labwc_backdropmgr`, `nscde_labwc_stylemgr`,
+  `nscde_labwc_sysaction`, `nscde_labwc_sysinfo`, `nscde_labwc_fontmgr`,
+  `nscde_labwc_windowmgr`
+  - now runtime-first clients with socket `query` / `subscribe`, with
+    env-file / FIFO fallback kept only as migration glue
+- `nscde_labwc_taskd`
+  - now a compatibility-only one-shot refresh shim
+  - steady-state `taskd` state is derived by the runtime from `windows`
 
 Current verified handoff:
 
-- `nscde-runtime daemon`, `ctl`, and `query` now pass the standalone
+- `nscde-runtime daemon`, `ctl`, `query`, and `subscribe` now pass the standalone
   `runtime-check`
 - the packaged launcher autostart now starts `nscde-runtime daemon`
 - `runtime-check`, `launcher-check`, and `nix flake check` cover this
@@ -189,6 +203,53 @@ Current verified handoff:
   compatibility env files and FIFOs
   - `runtime-check` now also covers the daemon-owned style-apply handoff for
     `rc.xml`, theme, backdrop, and toolkit font updates
+  - `runtime-check` now also asserts the fresh-session default backdrop plan,
+    including workspace-to-desk mapping, default backdrop name, resolved asset
+    path, and exported backdrop mode, to guard against the black-background
+    regression that appeared when runtime backdrop planning stopped falling back
+    to the legacy desk defaults
+- the steady-state live runtime path is now socket-first and event-driven:
+  long-lived Qt clients subscribe to runtime topics, `nscde_labwc_taskd`
+  no longer owns a live subscribe loop, and the native `C` daemons no longer use fixed
+  1-second polling loops for live state updates
+
+The current live-read preference is now:
+
+- runtime socket `subscribe`
+  - primary event-driven path for long-lived UI and bridge clients
+- runtime socket `query`
+  - primary one-shot read path for tools and startup sync
+- env files and FIFOs
+  - compatibility mirrors for legacy consumers and staged migration glue
+
+That means `windows.env`, `workspaces.env`, `pager.env`, `panel.env`,
+`panel-layout.env`, and `backdrops.env` remain important outputs, but they are
+no longer the intended owner-facing live API for newly refactored clients.
+
+## Runtime clarity checkpoint
+
+The current runtime is already past the main polling-to-events transition.
+
+Implemented checkpoint:
+
+- steady-state live reads are socket-first through `query` and `subscribe`
+- long-lived Qt tools consume runtime callbacks instead of file polling
+- shell task-list publication is driven from runtime subscriptions instead of
+  a `sleep 1` loop
+- native `C` helpers now block on `Wayland`, runtime, signal, or file-system
+  events instead of periodic live-state polling
+
+Remaining work to count the runtime as architecturally clear:
+
+1. shrink `legacy-shims/` further so it is wrappers and packaging glue only,
+   not the owner of remaining session/style behavior
+2. keep env/FIFO compatibility artifacts as mirrors only; owner-facing live
+   clients now require the runtime socket as the normal live API
+3. finish the `Haskell` module split away from leaf renderers and environment
+   scraping into the intended `Foundation`/`Domain`/`Policy`/`Backend` graph
+4. keep reconnect and startup semantics explicit and diagnosable now that the
+   transition-only helpers are gone: owner-facing clients fail loudly when the
+   runtime socket is unavailable or disconnects
 
 ## Dependency graph
 
@@ -580,10 +641,10 @@ owners.
 Desired relationship:
 
 - `nscde_paneld`
-  - now prefers runtime socket query/subscribe for `panel`, `panel-layout`,
+  - now uses runtime socket query/subscribe for `panel`, `panel-layout`,
     `workspaces`, and `subpanels`
-  - keeps `panel.env`, `panel-layout.env`, and `subpanels.env` as staged
-    fallback inputs during the transition
+  - keeps `panel.env`, `panel-layout.env`, and `subpanels.env` only as
+    compatibility outputs for transitional consumers
   - renders and sends commands
   - does not decide layout policy
 - `nscde_pagerd`
@@ -599,9 +660,14 @@ Stage-one compatibility is allowed:
 
 - keep env-file publication while migrating
 - keep FIFO command format until the daemon stabilizes
-- let native helpers prefer the runtime socket first, with env/FIFO fallback
-  kept only as migration glue
+- let native helpers use the runtime socket as the required owner-facing live
+  API, with env/FIFO artifacts kept only as migration glue for external or
+  compatibility consumers
 - later move event ingress to a clearer socket protocol if needed
+
+At this point compatibility guidance mainly applies to published mirrors and
+compatibility command bridges. The live owner-facing path is runtime-socket
+only and stays event-driven.
 
 ## Immediate refactor of the current Haskell seed
 

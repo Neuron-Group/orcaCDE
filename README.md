@@ -34,10 +34,15 @@ Current verified bootstrap status:
 
 - `nix flake check path:/.../NsCDE-Wayland` passes
 - `nix run path:/.../NsCDE-Wayland#launcher-check` passes
+- `nix run path:/.../NsCDE-Wayland#runtime-check` passes, including the
+  fresh-session backdrop contract
 - the default package now produces a runnable `nscde_labwc` bootstrap bundle
   with the extracted runtime, native daemons, assets, and temporary shell-era
   shims wired together
   - the launcher now defaults to the bundled patched `labwc/` submodule build
+  - the packaged runtime now publishes a default per-desk backdrop plan for
+    fresh sessions, so the nested `NsCDE` + `labwc` session no longer falls
+    back to an all-black background when no explicit backdrop has been saved yet
 
 ## Layout
 

@@ -14,6 +14,7 @@ data RuntimePaths = RuntimePaths
   , runtimePanelFile :: FilePath
   , runtimePanelLayoutFile :: FilePath
   , runtimeWorkspacesFile :: FilePath
+  , runtimeBackdropsFile :: FilePath
   , runtimeWindowsFile :: FilePath
   , runtimeSubpanelsFile :: FilePath
   , runtimePagerFile :: FilePath
@@ -38,6 +39,7 @@ resolveRuntimePaths env =
       , runtimePanelFile = stateDir </> "panel.env"
       , runtimePanelLayoutFile = stateDir </> "panel-layout.env"
       , runtimeWorkspacesFile = stateDir </> "workspaces.env"
+      , runtimeBackdropsFile = stateDir </> "backdrops.env"
       , runtimeWindowsFile = stateDir </> "windows.env"
       , runtimeSubpanelsFile = stateDir </> "subpanels.env"
       , runtimePagerFile = stateDir </> "pager.env"

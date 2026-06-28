@@ -26,6 +26,7 @@ static bool resolve_socket_path(char *dest, size_t dest_size);
 static bool resolve_state_dir(char *dest, size_t dest_size);
 static bool set_nonblock(int fd);
 static bool send_frame_request(int fd, const char *request_text);
+static bool write_text(char *dest, size_t dest_size, const char *src);
 
 bool
 nscde_runtime_query_topic(const char *topic, char **out_contents)
@@ -98,6 +99,54 @@ nscde_runtime_ctl_workspace_switch(const char *workspace_name)
 		close(fd);
 		return false;
 	}
+
+	response = read_response_frame(fd);
+	close(fd);
+	if (!response) {
+		return false;
+	}
+
+	frame.contents = response;
+	parse_frame_metadata(response, &frame);
+	success = frame.type == NSCDE_RUNTIME_FRAME_ACK;
+	nscde_runtime_frame_destroy(&frame);
+	return success;
+}
+
+bool
+nscde_runtime_publish_topic(const char *topic, const char *contents)
+{
+	int fd = -1;
+	char *request = NULL;
+	size_t request_len;
+	char *response;
+	struct nscde_runtime_frame frame = {0};
+	bool success = false;
+
+	if (!topic || !topic[0]) {
+		return false;
+	}
+
+	if (!connect_runtime_socket(false, &fd)) {
+		return false;
+	}
+
+	request_len = strlen(topic) + strlen(contents ? contents : "") + 32;
+	request = malloc(request_len);
+	if (!request) {
+		close(fd);
+		return false;
+	}
+
+	snprintf(request, request_len,
+		"TYPE=command\nNAME=publish-state\nTOPIC=%s\n%s\n",
+		topic, contents ? contents : "");
+	if (!send_frame_request(fd, request)) {
+		free(request);
+		close(fd);
+		return false;
+	}
+	free(request);
 
 	response = read_response_frame(fd);
 	close(fd);
@@ -189,6 +238,40 @@ nscde_runtime_subscription_read(struct nscde_runtime_subscription *subscription,
 	out_frame->contents = contents;
 	parse_frame_metadata(contents, out_frame);
 	return NSCDE_RUNTIME_READ_FRAME;
+}
+
+enum nscde_runtime_read_result
+nscde_runtime_subscription_drain(struct nscde_runtime_subscription *subscription,
+	nscde_runtime_frame_handler_fn handler, void *userdata,
+	char *error_message, size_t error_message_size)
+{
+	enum nscde_runtime_read_result result;
+
+	if (error_message && error_message_size > 0) {
+		error_message[0] = '\0';
+	}
+
+	for (;;) {
+		struct nscde_runtime_frame frame = {0};
+
+		result = nscde_runtime_subscription_read(subscription, &frame);
+		if (result != NSCDE_RUNTIME_READ_FRAME) {
+			return result;
+		}
+
+		if (frame.type == NSCDE_RUNTIME_FRAME_ERROR) {
+			if (frame.message[0]) {
+				write_text(error_message, error_message_size, frame.message);
+			}
+			nscde_runtime_frame_destroy(&frame);
+			return NSCDE_RUNTIME_READ_ERROR;
+		}
+
+		if (handler) {
+			handler(&frame, userdata);
+		}
+		nscde_runtime_frame_destroy(&frame);
+	}
 }
 
 void
@@ -313,6 +396,19 @@ copy_text(char *dest, size_t dest_size, const char *src)
 
 	memcpy(dest, src, len + 1);
 	return true;
+}
+
+static bool
+write_text(char *dest, size_t dest_size, const char *src)
+{
+	if (!dest || dest_size == 0) {
+		return false;
+	}
+	if (!src) {
+		dest[0] = '\0';
+		return true;
+	}
+	return copy_text(dest, dest_size, src);
 }
 
 static char *

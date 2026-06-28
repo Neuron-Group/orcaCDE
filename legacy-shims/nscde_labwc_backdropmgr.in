@@ -243,11 +243,13 @@ class NsCDEBackdropMgr(QWidget):
         self.current_desk = 1
         self.style_state = runtime_client.style_state()
         self.ncolors = self._current_color_mode()
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
         self._load_lists()
         self._detect_current_desk()
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -348,6 +350,40 @@ class NsCDEBackdropMgr(QWidget):
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "style", "workspaces"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic("style", self._handle_style_state)
+        self._runtime_subscription.on_topic(
+            "workspaces", self._handle_workspaces_state
+        )
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+            if self.selected_backdrop_path:
+                self._generate_preview(self.selected_backdrop_path, is_photo=False)
+
+    def _handle_style_state(self, state):
+        self.style_state = dict(state)
+        self.ncolors = self._current_color_mode()
+        if self.selected_backdrop_path:
+            self._generate_preview(self.selected_backdrop_path, is_photo=False)
+
+    def _handle_workspaces_state(self, state):
+        self._detect_current_desk_from_state(state)
+
     def _load_lists(self):
         self.backdrop_list.clear()
         seen = set()
@@ -368,7 +404,9 @@ class NsCDEBackdropMgr(QWidget):
                 self.photo_list.addItem(item)
 
     def _detect_current_desk(self):
-        state = runtime_client.workspaces_state()
+        self._detect_current_desk_from_state(runtime_client.workspaces_state())
+
+    def _detect_current_desk_from_state(self, state):
         workspaces = state.get(
             "NSCDE_WORKSPACES",
             state.get("NSCDE_PAGER_WORKSPACES", "One,Two,Three,Four"),
@@ -577,12 +615,21 @@ class NsCDEBackdropMgr(QWidget):
             self.apply_btn.setEnabled(True)
             self.apply_btn.setText("Apply")
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
 
 def main():
     app = QApplication(sys.argv)
-    mgr = NsCDEBackdropMgr()
-    mgr.show()
-    sys.exit(app.exec_())
+    try:
+        mgr = NsCDEBackdropMgr()
+        mgr.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

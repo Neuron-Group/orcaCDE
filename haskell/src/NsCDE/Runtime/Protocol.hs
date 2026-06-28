@@ -86,6 +86,14 @@ decodeCommand frame =
              (CommandWorkspaceRename
                (lookupText frame "OLD" "")
                (lookupText frame "NEW" "")))
+       "publish-state" ->
+         case parseRuntimeTopic (lookupText frame "TOPIC" "") of
+           Just topic ->
+             Right
+               (RequestCommand
+                 (CommandPublishState topic (publishStateEntries frame)))
+           Nothing ->
+             Left "unsupported publish topic"
        "reload" ->
          Right (RequestCommand CommandReload)
        "style-set" ->
@@ -122,6 +130,13 @@ styleSetEntries =
   where
     keepEntry (key, _) =
       key /= "TYPE" && key /= "NAME" && key /= "APPLY"
+
+publishStateEntries :: [KeyValue] -> [KeyValue]
+publishStateEntries =
+  filter keepEntry
+  where
+    keepEntry (key, _) =
+      key /= "TYPE" && key /= "NAME" && key /= "TOPIC"
 
 isPrefixOf :: Eq a => [a] -> [a] -> Bool
 isPrefixOf [] _ = True

@@ -102,12 +102,33 @@ Current limitation:
   count as a fully standalone runtime
 - some of those remaining pieces still live as `.in` templates because they
   rely on configure-style substitution during packaging
+- the live runtime path itself is now largely clear: socket `query` /
+  `subscribe` is the primary API for long-lived clients, and the recent
+  event-driven refactor removed the old steady-state polling loops from the
+  active Qt and native daemon paths
 - `menu.xml` generation has already moved out of that set: the standalone
   launcher now uses `nscde-runtime` for menu publishing, and the packaged
   bootstrap no longer ships `nscde_labwc_menugen`
 - keybind generation has now moved with it: the standalone launcher prefers
   `nscde-runtime labwc-keybinds publish`, and `nscde_labwc_keybindgen` remains
   only as a compatibility wrapper
+
+Current remaining runtime-clarity backlog:
+
+1. keep shrinking `legacy-shims/` to wrapper-only ownership
+2. reduce env/FIFO fallback further so compatibility mirrors stop looking like
+   the normal live interface
+3. complete the `Haskell` module split into the intended ownership graph
+4. clean up the remaining reconnect/startup transition glue around runtime
+   availability
+
+Recent runtime-clarity progress:
+
+- `taskd` live ownership has been removed from the steady-state session path;
+  the runtime now derives `taskd` state from runtime-owned `windows`
+- `nscde_pagerd` now publishes workspace snapshots into the runtime, so
+  `pager.env` and `workspaces.env` remain compatibility mirrors rather than
+  pager-owned canonical state
 
 ## Repo layout decision
 

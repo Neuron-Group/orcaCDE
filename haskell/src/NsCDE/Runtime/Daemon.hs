@@ -1,7 +1,9 @@
 module NsCDE.Runtime.Daemon
   ( runCtl
   , runDaemon
+  , runPublishState
   , runQuery
+  , runSubscribe
   ) where
 
 import Control.Concurrent
@@ -14,11 +16,12 @@ import Control.Concurrent
   , newMVar
   , readChan
   , readMVar
-  , threadDelay
+  , threadWaitRead
   , writeChan
   )
-import Control.Exception (finally)
+import Control.Exception (SomeException, displayException, finally, try)
 import Control.Monad (forever, void, when)
+import Data.List (intercalate)
 import Network.Socket
 import System.Directory (createDirectoryIfMissing, removeFile)
 import System.Environment (getEnvironment)
@@ -28,9 +31,11 @@ import System.IO
   , Handle
   , IOMode(ReadWriteMode)
   , hClose
+  , hFlush
   , hPutStrLn
   , hSetBuffering
   , stderr
+  , stdout
   )
 import System.IO.Error (catchIOError)
 import System.Posix.IO
@@ -102,6 +107,10 @@ runCtl command = do
       when (not handled) $
         failWith "runtime daemon and compatibility control path are unavailable"
 
+runPublishState :: RuntimeTopic -> [KeyValue] -> IO ()
+runPublishState topic entries =
+  runCtl (CommandPublishState topic entries)
+
 runQuery :: RuntimeTopic -> IO ()
 runQuery topic = do
   env <- getEnvironment
@@ -118,6 +127,30 @@ runQuery topic = do
       Nothing ->
         fallbackQuery env topic
   putStr (renderEnvFile entries)
+
+runSubscribe :: [RuntimeTopic] -> IO ()
+runSubscribe requestedTopics =
+  if null topics
+    then failWith "subscribe requires at least one topic"
+    else do
+      env <- getEnvironment
+      let paths = resolveRuntimePaths env
+      withSocketsDo $
+        catchIOError
+          (do
+            clientSocket <- socket AF_UNIX Stream defaultProtocol
+            connect clientSocket (SockAddrUnix (runtimeSocketFile paths))
+            handle <- socketToHandle clientSocket ReadWriteMode
+            hSetBuffering handle LineBuffering
+            writeFrame
+              handle
+              [ ("TYPE", "subscribe")
+              , ("TOPICS", intercalate "," (map renderRuntimeTopic topics))
+              ]
+            streamSubscription handle)
+          (\_ -> failWith "runtime daemon subscribe path is unavailable")
+  where
+    topics = uniqueTopics requestedTopics
 
 handleClient :: MVar ServerState -> Socket -> IO ()
 handleClient stateVar clientSocket = do
@@ -148,16 +181,22 @@ handleRequest stateVar request =
       serverState <- readMVar stateVar
       ResponseState topic <$> queryTopicEntries (serverRuntimeState serverState) topic
     RequestCommand command -> do
-      (changedTopics, message) <- modifyMVar stateVar $ \serverState -> do
-        (updatedRuntimeState, updatedTopics, updatedMessage) <-
-          handleRuntimeCommand command (serverRuntimeState serverState)
-        writeCompatibilityOutputs updatedRuntimeState
+      transition <- modifyMVar stateVar $ \serverState -> do
+        transition <- handleRuntimeCommand command (serverRuntimeState serverState)
+        writeCompatibilityOutputs (runtimeTransitionState transition)
         pure
-          ( serverState {serverRuntimeState = updatedRuntimeState}
-          , (updatedTopics, updatedMessage)
+          ( serverState {serverRuntimeState = runtimeTransitionState transition}
+          , transition
           )
-      broadcastTopics stateVar changedTopics
-      pure (ResponseAck message)
+      effectResult <- try (performRuntimeTransitionEffects transition)
+      broadcastTopics stateVar (runtimeTransitionTopics transition)
+      case effectResult of
+        Right message ->
+          pure (ResponseAck message)
+        Left err ->
+          pure
+            (ResponseError
+              ("runtime transition failed: " ++ displayException (err :: SomeException)))
 
 handleSubscription :: MVar ServerState -> Handle -> [RuntimeTopic] -> IO ()
 handleSubscription stateVar handle requestedTopics =
@@ -246,6 +285,7 @@ fifoLoop stateVar = do
   loop fd ""
   where
     loop fd leftover = do
+      threadWaitRead fd
       readResult <- catchIOError (Just <$> fdRead fd 4096) (\_ -> pure Nothing)
       case readResult of
         Nothing -> do
@@ -255,23 +295,29 @@ fifoLoop stateVar = do
           newFd <- openFd fifoPath ReadOnly defaultFileFlags {nonBlock = True}
           loop newFd leftover
         Just (chunk, _) -> do
-          when (null chunk) $
-            threadDelay 200000
-          let (nextLeftover, completeLines) = extractLines leftover chunk
-          mapM_ (applyCompatLine stateVar) completeLines
-          loop fd nextLeftover
+          if null chunk
+            then do
+              closeFd fd
+              serverState <- readMVar stateVar
+              let fifoPath = runtimeCommandFifo (runtimePaths (serverRuntimeState serverState))
+              newFd <- openFd fifoPath ReadOnly defaultFileFlags {nonBlock = True}
+              loop newFd leftover
+            else do
+              let (nextLeftover, completeLines) = extractLines leftover chunk
+              mapM_ (applyCompatLine stateVar) completeLines
+              loop fd nextLeftover
 
 applyCompatLine :: MVar ServerState -> String -> IO ()
 applyCompatLine stateVar rawLine = do
-  changedTopics <- modifyMVar stateVar $ \serverState -> do
-    (updatedRuntimeState, updatedTopics, _) <-
-      handleCompatCommandLine rawLine (serverRuntimeState serverState)
-    writeCompatibilityOutputs updatedRuntimeState
+  transition <- modifyMVar stateVar $ \serverState -> do
+    transition <- handleCompatCommandLine rawLine (serverRuntimeState serverState)
+    writeCompatibilityOutputs (runtimeTransitionState transition)
     pure
-      ( serverState {serverRuntimeState = updatedRuntimeState}
-      , updatedTopics
+      ( serverState {serverRuntimeState = runtimeTransitionState transition}
+      , transition
       )
-  broadcastTopics stateVar changedTopics
+  _ <- performRuntimeTransitionEffects transition
+  broadcastTopics stateVar (runtimeTransitionTopics transition)
 
 requestServer :: RuntimePaths -> [KeyValue] -> IO (Maybe [KeyValue])
 requestServer paths requestFrame =
@@ -316,6 +362,11 @@ commandFrame command =
       [ ("TYPE", "command")
       , ("NAME", "reload")
       ]
+    CommandPublishState topic entries ->
+      [ ("TYPE", "command")
+      , ("NAME", "publish-state")
+      , ("TOPIC", renderRuntimeTopic topic)
+      ] ++ entries
     CommandStyleSet styleEntries applyNow ->
       [ ("TYPE", "command")
       , ("NAME", "style-set")
@@ -382,3 +433,16 @@ failWith :: String -> IO ()
 failWith message = do
   hPutStrLn stderr message
   exitFailure
+
+streamSubscription :: Handle -> IO ()
+streamSubscription handle =
+  finally loop (hClose handle)
+  where
+    loop = do
+      frame <- readFrame handle
+      if null frame
+        then pure ()
+        else do
+          putStr (renderFrame frame)
+          hFlush stdout
+          loop

@@ -150,8 +150,7 @@ export NSCDE_STATIC_SESSION_ENV_FILE="${NSCDE_STATIC_SESSION_ENV_FILE:-}"
 "$NSCDE_RUNTIME_BIN" daemon &
 "$NSCDE_TOOLSDIR/nscde_labwc_pagerd" &
 "$NSCDE_TOOLSDIR/nscde_labwc_toplevel" &
-"$NSCDE_TOOLSDIR/nscde_labwc_taskd" &
-"$NSCDE_TOOLSDIR/nscde_labwc_bg" &
+"$NSCDE_TOOLSDIR/nscde_backdropd" &
 "$NSCDE_TOOLSDIR/nscde_labwc_paneld" &
 if [ "$NSCDE_LABWC_AUTOSTART_TERMINAL" = "1" ]; then
 "$_labwc_terminal" &

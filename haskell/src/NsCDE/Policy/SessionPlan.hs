@@ -46,8 +46,7 @@ buildSessionPlan env =
         , renderCommand runtimeBin ++ " daemon &"
         , renderCommand (toolsDir </> "nscde_labwc_pagerd") ++ " &"
         , renderCommand (toolsDir </> "nscde_labwc_toplevel") ++ " &"
-        , renderCommand (toolsDir </> "nscde_labwc_taskd") ++ " &"
-        , renderCommand (toolsDir </> "nscde_labwc_bg") ++ " &"
+        , renderCommand (toolsDir </> "nscde_backdropd") ++ " &"
         , renderCommand (toolsDir </> "nscde_labwc_paneld") ++ " &"
         ]
         ++ renderTerminalLaunch autostartTerminal terminal

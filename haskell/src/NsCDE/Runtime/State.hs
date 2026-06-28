@@ -1,5 +1,10 @@
 module NsCDE.Runtime.State
   ( RuntimeState(..)
+  , RuntimeTransition
+  , performRuntimeTransitionEffects
+  , runtimeTransitionMessage
+  , runtimeTransitionState
+  , runtimeTransitionTopics
   , fallbackCommand
   , fallbackQuery
   , handleCompatCommandLine
@@ -10,7 +15,7 @@ module NsCDE.Runtime.State
   , ensureCompatibilityFifos
   ) where
 
-import Control.Monad (unless, when)
+import Control.Monad (unless)
 import Data.Bits ((.|.))
 import Data.List (intercalate)
 import System.Directory (createDirectoryIfMissing, doesFileExist)
@@ -19,18 +24,40 @@ import System.IO.Error (catchIOError)
 import System.Posix.Files (createNamedPipe, fileExist, getFileStatus, isNamedPipe, ownerReadMode, ownerWriteMode, removeLink)
 import System.Posix.IO (OpenFileFlags(..), OpenMode(..), closeFd, defaultFileFlags, fdWrite, openFd)
 import System.Posix.Types (FileMode)
-import System.Process (rawSystem)
+import System.Process (createProcess, proc, waitForProcess)
 
 import NsCDE.Domain.Runtime
-import NsCDE.Domain.Style (styleFpVariant)
+import NsCDE.Domain.Style
+  ( StyleState
+  , styleFpVariant
+  )
 import NsCDE.Foundation.Common (splitCommaList, writeAtomicFile)
-import NsCDE.Foundation.EnvFile (KeyValue, readEnvFileIfExists, renderEnvFile)
+import NsCDE.Foundation.EnvFile
+  ( KeyValue
+  , parseEnvContents
+  , readEnvFileIfExists
+  , renderEnvFile
+  )
 import NsCDE.Foundation.Paths
 import NsCDE.Foundation.Settings (lookupText)
+import NsCDE.Policy.Backdrop (buildBackdropPlan, renderBackdropEntries)
 import qualified NsCDE.Policy.StyleApply as StyleApply
 import NsCDE.Parse.Subpanels (loadSubpanels, renderSubpanelsEnv)
 import NsCDE.Policy.PanelLayout (emitPanelLayout, loadStaticPanelProfile)
+import qualified NsCDE.Store.BackdropState as BackdropStore
 import qualified NsCDE.Store.StyleState as StyleStore
+
+data RuntimeEffect
+  = RuntimeEffectCompatCommand FilePath String
+  | RuntimeEffectApplyResolvedStyle StyleStore.ResolvedStyleState
+  | RuntimeEffectReloadBackend
+
+data RuntimeTransition = RuntimeTransition
+  { runtimeTransitionState :: RuntimeState
+  , runtimeTransitionTopics :: [RuntimeTopic]
+  , runtimeTransitionEffects :: [RuntimeEffect]
+  , runtimeTransitionMessage :: String
+  }
 
 data RuntimeState = RuntimeState
   { runtimeBackendName :: String
@@ -61,9 +88,13 @@ data RuntimeState = RuntimeState
   , runtimeDisplayName :: String
   , runtimePanelLayoutEntries :: [KeyValue]
   , runtimeSubpanelEntries :: [KeyValue]
+  , runtimeBackdropEntries :: [KeyValue]
+  , runtimeWindowsEntries :: [KeyValue]
+  , runtimeTaskEntries :: [KeyValue]
   , runtimePaletteEntries :: [KeyValue]
   , runtimeCapabilityEntries :: [KeyValue]
   , runtimeFpVariant :: String
+  , runtimeStyleState :: StyleState
   , runtimePaths :: RuntimePaths
   } deriving (Eq, Show)
 
@@ -92,41 +123,54 @@ loadRuntimeState env = do
   panelLayoutEntries <- loadPanelLayoutEntries env paths
   subpanelEntries <- fmap renderSubpanelsEnv (loadSubpanels env)
   resolvedStyle <- StyleStore.readResolvedStyleState paths paletteFallbackFile
-  pure RuntimeState
-    { runtimeBackendName = backendName
-    , runtimeVersionString = lookupText env "NSCDE_VERSION" "unknown"
-    , runtimeHomeDir = homeDir
-    , runtimeRootDir = rootDir
-    , runtimeDataDir = dataDir
-    , runtimeToolsDir = lookupText env "NSCDE_TOOLSDIR" ""
-    , runtimeFvwmUserDir = lookupText env "FVWM_USERDIR" (homeDir </> ".NsCDE")
-    , runtimeXdgConfigHome = lookupText env "XDG_CONFIG_HOME" (homeDir </> ".config")
-    , runtimeXdgCacheHome = lookupText env "XDG_CACHE_HOME" (homeDir </> ".cache")
-    , runtimeXdgDataHome = lookupText env "XDG_DATA_HOME" (homeDir </> ".local" </> "share")
-    , runtimeXdgRuntimeDir = lookupText env "XDG_RUNTIME_DIR" ""
-    , runtimeSystemPath = lookupText env "PATH" ""
-    , runtimeThemeName = lookupText env "NSCDE_THEME_NAME" (lookupText env "NSCDE_LABWC_THEME_NAME" "NsCDE-Stage1")
-    , runtimeWorkspaces = workspaceNames
-    , runtimeCurrentWorkspace = currentWorkspace
-    , runtimePaletteFallbackFile = paletteFallbackFile
-    , runtimePaletteFile = StyleStore.resolvedStylePaletteFile resolvedStyle
-    , runtimePanelLayoutExternal = lookupText env "NSCDE_PANEL_LAYOUT_EXTERNAL" "0" == "1"
-    , runtimeLabwcConfigDir = lookupText env "NSCDE_LABWC_CONFIG_DIR" ""
-    , runtimeLabwcKeybindXmlFile =
-        lookupText env "NSCDE_LABWC_KEYBIND_XML_FILE" (runtimeStateDir paths </> "labwc-keybinds.xml")
-    , runtimeLabwcTitleFontName = lookupText env "NSCDE_LABWC_TITLE_FONT_NAME" "Sans"
-    , runtimeLabwcTitleFontSize = lookupText env "NSCDE_LABWC_TITLE_FONT_SIZE" "10"
-    , runtimeLabwcTitleFontSlant = lookupText env "NSCDE_LABWC_TITLE_FONT_SLANT" "normal"
-    , runtimeLabwcTitleFontWeight = lookupText env "NSCDE_LABWC_TITLE_FONT_WEIGHT" "bold"
-    , runtimeWaylandDisplay = lookupText env "WAYLAND_DISPLAY" ""
-    , runtimeDisplayName = lookupText env "DISPLAY" ""
-    , runtimePanelLayoutEntries = panelLayoutEntries
-    , runtimeSubpanelEntries = subpanelEntries
-    , runtimePaletteEntries = StyleStore.resolvedStylePaletteEntries resolvedStyle
-    , runtimeCapabilityEntries = capabilityEntries backendName
-    , runtimeFpVariant = styleFpVariant (StyleStore.resolvedStyleState resolvedStyle)
-    , runtimePaths = paths
-    }
+  storedWindowsEntries <- readEnvFileIfExists (runtimeWindowsFile paths)
+  let initialWindows =
+        if null storedWindowsEntries
+          then initialWindowsEntries
+          else storedWindowsEntries
+      initialTasks =
+        deriveTaskEntries (runtimeToplevelFifo paths) initialWindows
+  let baseState =
+        RuntimeState
+          { runtimeBackendName = backendName
+          , runtimeVersionString = lookupText env "NSCDE_VERSION" "unknown"
+          , runtimeHomeDir = homeDir
+          , runtimeRootDir = rootDir
+          , runtimeDataDir = dataDir
+          , runtimeToolsDir = lookupText env "NSCDE_TOOLSDIR" ""
+          , runtimeFvwmUserDir = lookupText env "FVWM_USERDIR" (homeDir </> ".NsCDE")
+          , runtimeXdgConfigHome = lookupText env "XDG_CONFIG_HOME" (homeDir </> ".config")
+          , runtimeXdgCacheHome = lookupText env "XDG_CACHE_HOME" (homeDir </> ".cache")
+          , runtimeXdgDataHome = lookupText env "XDG_DATA_HOME" (homeDir </> ".local" </> "share")
+          , runtimeXdgRuntimeDir = lookupText env "XDG_RUNTIME_DIR" ""
+          , runtimeSystemPath = lookupText env "PATH" ""
+          , runtimeThemeName = lookupText env "NSCDE_THEME_NAME" (lookupText env "NSCDE_LABWC_THEME_NAME" "NsCDE-Stage1")
+          , runtimeWorkspaces = workspaceNames
+          , runtimeCurrentWorkspace = currentWorkspace
+          , runtimePaletteFallbackFile = paletteFallbackFile
+          , runtimePaletteFile = StyleStore.resolvedStylePaletteFile resolvedStyle
+          , runtimePanelLayoutExternal = lookupText env "NSCDE_PANEL_LAYOUT_EXTERNAL" "0" == "1"
+          , runtimeLabwcConfigDir = lookupText env "NSCDE_LABWC_CONFIG_DIR" ""
+          , runtimeLabwcKeybindXmlFile =
+              lookupText env "NSCDE_LABWC_KEYBIND_XML_FILE" (runtimeStateDir paths </> "labwc-keybinds.xml")
+          , runtimeLabwcTitleFontName = lookupText env "NSCDE_LABWC_TITLE_FONT_NAME" "Sans"
+          , runtimeLabwcTitleFontSize = lookupText env "NSCDE_LABWC_TITLE_FONT_SIZE" "10"
+          , runtimeLabwcTitleFontSlant = lookupText env "NSCDE_LABWC_TITLE_FONT_SLANT" "normal"
+          , runtimeLabwcTitleFontWeight = lookupText env "NSCDE_LABWC_TITLE_FONT_WEIGHT" "bold"
+          , runtimeWaylandDisplay = lookupText env "WAYLAND_DISPLAY" ""
+          , runtimeDisplayName = lookupText env "DISPLAY" ""
+          , runtimePanelLayoutEntries = panelLayoutEntries
+          , runtimeSubpanelEntries = subpanelEntries
+          , runtimeBackdropEntries = []
+          , runtimeWindowsEntries = initialWindows
+          , runtimeTaskEntries = initialTasks
+          , runtimePaletteEntries = StyleStore.resolvedStylePaletteEntries resolvedStyle
+          , runtimeCapabilityEntries = capabilityEntries backendName
+          , runtimeFpVariant = styleFpVariant (StyleStore.resolvedStyleState resolvedStyle)
+          , runtimeStyleState = StyleStore.resolvedStyleState resolvedStyle
+          , runtimePaths = paths
+          }
+  refreshBackdropEntries baseState
 
 writeCompatibilityOutputs :: RuntimeState -> IO ()
 writeCompatibilityOutputs runtimeState = do
@@ -137,15 +181,12 @@ writeCompatibilityOutputs runtimeState = do
     writeEnvFile (runtimePanelLayoutFile paths) (runtimePanelLayoutEntries runtimeState)
   writeEnvFile (runtimePanelFile paths) (panelEntries runtimeState)
   writeEnvFile (runtimeWorkspacesFile paths) (workspacesEntries runtimeState)
+  writeEnvFile (runtimeBackdropsFile paths) (runtimeBackdropEntries runtimeState)
   writeEnvFile (runtimePagerFile paths) (pagerEntries runtimeState)
   writeEnvFile (runtimeSubpanelsFile paths) (runtimeSubpanelEntries runtimeState)
   writeEnvFile (runtimeCapabilitiesFile paths) (runtimeCapabilityEntries runtimeState)
-  windowsExist <- doesFileExist (runtimeWindowsFile paths)
-  unless windowsExist $
-    writeEnvFile (runtimeWindowsFile paths) initialWindowsEntries
-  taskdExist <- doesFileExist (runtimeTaskdFile paths)
-  unless taskdExist $
-    writeEnvFile (runtimeTaskdFile paths) initialTaskEntries
+  writeEnvFile (runtimeWindowsFile paths) (runtimeWindowsEntries runtimeState)
+  writeEnvFile (runtimeTaskdFile paths) (runtimeTaskEntries runtimeState)
 
 ensureCompatibilityFifos :: RuntimeState -> IO ()
 ensureCompatibilityFifos runtimeState = do
@@ -157,20 +198,29 @@ ensureCompatibilityFifos runtimeState = do
     , runtimeToplevelFifo paths
     ]
 
-handleRuntimeCommand :: RuntimeCommand -> RuntimeState -> IO (RuntimeState, [RuntimeTopic], String)
+handleRuntimeCommand :: RuntimeCommand -> RuntimeState -> IO RuntimeTransition
 handleRuntimeCommand command runtimeState =
   case command of
     CommandWorkspaceSwitch workspaceName ->
       if workspaceName `elem` runtimeWorkspaces runtimeState
         then do
           let updatedState = runtimeState {runtimeCurrentWorkspace = workspaceName}
-          writeWorkspaceOutputs updatedState
-          forwarded <- writeCompatCommand (runtimePagerFifo (runtimePaths updatedState)) ("switch_workspace:" ++ workspaceName)
-          pure (updatedState, changedWorkspaceTopics, bridgeMessage forwarded "workspace updated")
-        else pure (runtimeState, [], "workspace not found")
+          syncedState <- refreshBackdropEntries updatedState
+          pure $
+            RuntimeTransition
+              { runtimeTransitionState = syncedState
+              , runtimeTransitionTopics = changedWorkspaceTopics
+              , runtimeTransitionEffects =
+                  [ RuntimeEffectCompatCommand
+                      (runtimePagerFifo (runtimePaths syncedState))
+                      ("switch_workspace:" ++ workspaceName)
+                  ]
+              , runtimeTransitionMessage = "workspace updated"
+              }
+        else pure (unchangedTransition runtimeState "workspace not found")
     CommandWorkspaceRename oldWorkspace newWorkspace ->
       if null newWorkspace || oldWorkspace == newWorkspace || oldWorkspace `notElem` runtimeWorkspaces runtimeState
-        then pure (runtimeState, [], "workspace rename skipped")
+        then pure (unchangedTransition runtimeState "workspace rename skipped")
         else do
           let renamedWorkspaces = map (\workspaceName -> if workspaceName == oldWorkspace then newWorkspace else workspaceName) (runtimeWorkspaces runtimeState)
               renamedCurrent =
@@ -182,42 +232,77 @@ handleRuntimeCommand command runtimeState =
                   { runtimeWorkspaces = renamedWorkspaces
                   , runtimeCurrentWorkspace = renamedCurrent
                   }
-          writeWorkspaceOutputs updatedState
-          pure (updatedState, changedWorkspaceTopics, "workspace renamed")
-    CommandWindow windowCommand windowId -> do
-      forwarded <- writeCompatCommand (runtimeToplevelFifo (runtimePaths runtimeState)) (renderWindowCompat windowCommand windowId)
-      pure (runtimeState, [], bridgeMessage forwarded "window command forwarded")
+          syncedState <- refreshBackdropEntries updatedState
+          pure $
+            RuntimeTransition
+              { runtimeTransitionState = syncedState
+              , runtimeTransitionTopics = changedWorkspaceTopics
+              , runtimeTransitionEffects =
+                  [ RuntimeEffectCompatCommand
+                      (runtimeCommandFifo (runtimePaths syncedState))
+                      ("rename_workspace:" ++ oldWorkspace ++ ":" ++ newWorkspace)
+                  ]
+              , runtimeTransitionMessage = "workspace renamed"
+              }
+    CommandWindow windowCommand windowId ->
+      pure $
+        RuntimeTransition
+          { runtimeTransitionState = runtimeState
+          , runtimeTransitionTopics = []
+          , runtimeTransitionEffects =
+              [ RuntimeEffectCompatCommand
+                  (runtimeToplevelFifo (runtimePaths runtimeState))
+                  (renderWindowCompat windowCommand windowId)
+              ]
+          , runtimeTransitionMessage = "window command forwarded"
+          }
+    CommandPublishState topic entries ->
+      publishRuntimeState topic entries runtimeState
     CommandStyleSet styleUpdates applyNow -> do
       resolvedStyle <-
         StyleStore.writeResolvedStyleEntries
           (runtimePaths runtimeState)
           (runtimePaletteFallbackFile runtimeState)
           styleUpdates
-      let updatedState = updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle
-      when applyNow $
-        applyResolvedRuntimeStyleState updatedState resolvedStyle
+      updatedState <- refreshBackdropEntries (updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle)
       pure
-        ( updatedState
-        , changedStyleTopics runtimeState updatedState
-        , if applyNow then "style updated and applied" else "style updated"
-        )
+        RuntimeTransition
+          { runtimeTransitionState = updatedState
+          , runtimeTransitionTopics = changedStyleTopics runtimeState updatedState
+          , runtimeTransitionEffects =
+              [ RuntimeEffectApplyResolvedStyle resolvedStyle
+              | applyNow
+              ]
+          , runtimeTransitionMessage =
+              if applyNow then "style updated and applied" else "style updated"
+          }
     CommandStyleApply -> do
       resolvedStyle <-
         StyleStore.readResolvedStyleState
           (runtimePaths runtimeState)
           (runtimePaletteFallbackFile runtimeState)
-      let updatedState = updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle
-      applyResolvedRuntimeStyleState updatedState resolvedStyle
-      pure (updatedState, changedStyleTopics runtimeState updatedState, "style applied")
-    CommandReload -> do
-      reloadBackend runtimeState
-      pure (runtimeState, [], "reload requested")
+      updatedState <- refreshBackdropEntries (updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle)
+      pure
+        RuntimeTransition
+          { runtimeTransitionState = updatedState
+          , runtimeTransitionTopics = changedStyleTopics runtimeState updatedState
+          , runtimeTransitionEffects = [RuntimeEffectApplyResolvedStyle resolvedStyle]
+          , runtimeTransitionMessage = "style applied"
+          }
+    CommandReload ->
+      pure $
+        RuntimeTransition
+          { runtimeTransitionState = runtimeState
+          , runtimeTransitionTopics = []
+          , runtimeTransitionEffects = [RuntimeEffectReloadBackend]
+          , runtimeTransitionMessage = "reload requested"
+          }
 
-handleCompatCommandLine :: String -> RuntimeState -> IO (RuntimeState, [RuntimeTopic], String)
+handleCompatCommandLine :: String -> RuntimeState -> IO RuntimeTransition
 handleCompatCommandLine rawLine runtimeState =
   case parseCompatCommandLine rawLine of
     Just command -> handleRuntimeCommand command runtimeState
-    Nothing -> pure (runtimeState, [], "ignored")
+    Nothing -> pure (unchangedTransition runtimeState "ignored")
 
 queryTopicEntries :: RuntimeState -> RuntimeTopic -> IO [KeyValue]
 queryTopicEntries runtimeState topic =
@@ -229,11 +314,12 @@ queryTopicEntries runtimeState topic =
         then readEnvFileIfExists (runtimePanelLayoutFile (runtimePaths runtimeState))
         else pure (runtimePanelLayoutEntries runtimeState)
     TopicWorkspaces -> pure (workspacesEntries runtimeState)
+    TopicBackdrops -> pure (runtimeBackdropEntries runtimeState)
     TopicSubpanels -> pure (runtimeSubpanelEntries runtimeState)
     TopicPager -> pure (pagerEntries runtimeState)
     TopicCapabilities -> pure (runtimeCapabilityEntries runtimeState)
-    TopicWindows -> loadOrDefault (runtimeWindowsFile (runtimePaths runtimeState)) initialWindowsEntries
-    TopicTaskd -> loadOrDefault (runtimeTaskdFile (runtimePaths runtimeState)) initialTaskEntries
+    TopicWindows -> pure (runtimeWindowsEntries runtimeState)
+    TopicTaskd -> pure (runtimeTaskEntries runtimeState)
     TopicStyle -> StyleStore.readStyleEntries (runtimePaths runtimeState)
 
 fallbackQuery :: [KeyValue] -> RuntimeTopic -> IO [KeyValue]
@@ -253,6 +339,8 @@ fallbackCommand env command =
          writeCompatCommand (runtimeCommandFifo paths) "reload"
        CommandWindow windowCommand windowId ->
          writeCompatCommand (runtimeToplevelFifo paths) (renderWindowCompat windowCommand windowId)
+       CommandPublishState _ _ ->
+         pure False
        CommandStyleSet _ _ ->
          pure False
        CommandStyleApply ->
@@ -281,6 +369,8 @@ sessionEntries runtimeState =
   , ("WAYLAND_DISPLAY", runtimeWaylandDisplay runtimeState)
   , ("DISPLAY", runtimeDisplayName runtimeState)
   , ("NSCDE_SESSION_COMMAND_FIFO", runtimeCommandFifo (runtimePaths runtimeState))
+  , ("NSCDE_BACKDROP_IMAGE", backdropValue "NSCDE_BACKDROP_IMAGE" runtimeState)
+  , ("NSCDE_BACKDROP_COLOR", backdropValue "NSCDE_BACKDROP_COLOR" runtimeState)
   ]
 
 panelEntries :: RuntimeState -> [KeyValue]
@@ -314,12 +404,6 @@ initialWindowsEntries :: [KeyValue]
 initialWindowsEntries =
   [ ("NSCDE_WINDOW_COUNT", "0")
   , ("NSCDE_FOCUSED_WINDOW", "")
-  ]
-
-initialTaskEntries :: [KeyValue]
-initialTaskEntries =
-  [ ("NSCDE_TASK_COUNT", "0")
-  , ("NSCDE_TASK_FOCUSED", "")
   ]
 
 capabilityEntries :: String -> [KeyValue]
@@ -360,24 +444,9 @@ workspaceIndex runtimeState =
       | workspaceName == runtimeCurrentWorkspace runtimeState = Just index
       | otherwise = findIndex (index + 1) rest
 
-writeWorkspaceOutputs :: RuntimeState -> IO ()
-writeWorkspaceOutputs runtimeState = do
-  let paths = runtimePaths runtimeState
-  writeEnvFile (runtimePanelFile paths) (panelEntries runtimeState)
-  writeEnvFile (runtimeWorkspacesFile paths) (workspacesEntries runtimeState)
-  writeEnvFile (runtimePagerFile paths) (pagerEntries runtimeState)
-
 writeEnvFile :: FilePath -> [KeyValue] -> IO ()
 writeEnvFile targetPath entries =
   writeAtomicFile targetPath (renderEnvFile entries)
-
-loadOrDefault :: FilePath -> [KeyValue] -> IO [KeyValue]
-loadOrDefault targetPath fallbackEntries = do
-  entries <- readEnvFileIfExists targetPath
-  pure $
-    if null entries
-      then fallbackEntries
-      else entries
 
 ensureFifo :: FilePath -> IO ()
 ensureFifo targetPath = do
@@ -404,20 +473,21 @@ reloadBackend :: RuntimeState -> IO ()
 reloadBackend runtimeState =
   case runtimeBackendName runtimeState of
     "labwc" -> do
-      _ <- rawSystem "pkill" ["-HUP", "-x", "labwc"]
-      pure ()
+      maybePkill <- findExecutableInPath (runtimeSystemPath runtimeState) "pkill"
+      case maybePkill of
+        Just pkillPath -> do
+          (_, _, _, processHandle) <- createProcess (proc pkillPath ["-HUP", "-x", "labwc"])
+          _ <- waitForProcess processHandle
+          pure ()
+        Nothing ->
+          pure ()
     _ -> pure ()
-
-bridgeMessage :: Bool -> String -> String
-bridgeMessage forwarded successMessage =
-  if forwarded
-    then successMessage
-    else successMessage ++ " (compat bridge unavailable)"
 
 changedWorkspaceTopics :: [RuntimeTopic]
 changedWorkspaceTopics =
   [ TopicPanel
   , TopicWorkspaces
+  , TopicBackdrops
   , TopicPager
   ]
 
@@ -428,6 +498,47 @@ changedStyleTopics previousState updatedState =
     | runtimeFpVariant previousState /= runtimeFpVariant updatedState
         || runtimePaletteEntries previousState /= runtimePaletteEntries updatedState
     ]
+    ++
+    [ TopicBackdrops
+    | runtimeCurrentWorkspace previousState /= runtimeCurrentWorkspace updatedState
+        || runtimeStyleState previousState /= runtimeStyleState updatedState
+        || runtimePaletteEntries previousState /= runtimePaletteEntries updatedState
+    ]
+
+unchangedTransition :: RuntimeState -> String -> RuntimeTransition
+unchangedTransition runtimeState message =
+  RuntimeTransition
+    { runtimeTransitionState = runtimeState
+    , runtimeTransitionTopics = []
+    , runtimeTransitionEffects = []
+    , runtimeTransitionMessage = message
+    }
+
+publishRuntimeState :: RuntimeTopic -> [KeyValue] -> RuntimeState -> IO RuntimeTransition
+publishRuntimeState topic entries runtimeState =
+  case topic of
+    TopicWindows -> do
+      let normalizedEntries = normalizeWindowsEntries entries
+          updatedState = runtimeState
+            { runtimeWindowsEntries = normalizedEntries
+            , runtimeTaskEntries =
+                deriveTaskEntries
+                  (runtimeToplevelFifo (runtimePaths runtimeState))
+                  normalizedEntries
+            }
+      pure $
+        RuntimeTransition
+          { runtimeTransitionState = updatedState
+          , runtimeTransitionTopics = [TopicWindows, TopicTaskd]
+          , runtimeTransitionEffects = []
+          , runtimeTransitionMessage = "state published"
+          }
+    TopicWorkspaces ->
+      publishWorkspaceLikeState entries runtimeState
+    TopicPager ->
+      publishWorkspaceLikeState entries runtimeState
+    _ ->
+      pure (unchangedTransition runtimeState "publish unsupported for topic")
 
 updateRuntimeStateFromResolvedStyle :: RuntimeState -> StyleStore.ResolvedStyleState -> RuntimeState
 updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle =
@@ -438,7 +549,145 @@ updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle =
           [] -> runtimePaletteEntries runtimeState
           entries -> entries
     , runtimeFpVariant = styleFpVariant (StyleStore.resolvedStyleState resolvedStyle)
+    , runtimeStyleState = StyleStore.resolvedStyleState resolvedStyle
     }
+
+refreshBackdropEntries :: RuntimeState -> IO RuntimeState
+refreshBackdropEntries runtimeState = do
+  entries <- computeBackdropEntries runtimeState
+  pure $
+    runtimeState
+      { runtimeBackdropEntries = entries
+      }
+
+computeBackdropEntries :: RuntimeState -> IO [KeyValue]
+computeBackdropEntries runtimeState =
+  fmap renderBackdropEntries $
+    buildBackdropPlan
+      (runtimeFvwmUserDir runtimeState)
+      (runtimeDataDir runtimeState)
+      (runtimeWorkspaces runtimeState)
+      (runtimeCurrentWorkspace runtimeState)
+      (runtimeStyleState runtimeState)
+      (runtimePaletteEntries runtimeState)
+
+writeBackdropOutputs :: RuntimeState -> IO ()
+writeBackdropOutputs runtimeState =
+  BackdropStore.writeBackdropEntries
+    (runtimePaths runtimeState)
+    (runtimeBackdropEntries runtimeState)
+
+backdropValue :: String -> RuntimeState -> String
+backdropValue key runtimeState =
+  lookupBackdropValue key (runtimeBackdropEntries runtimeState)
+
+lookupBackdropValue :: String -> [KeyValue] -> String
+lookupBackdropValue _ [] = ""
+lookupBackdropValue key ((candidateKey, value):rest)
+  | key == candidateKey = value
+  | otherwise = lookupBackdropValue key rest
+
+normalizeWindowsEntries :: [KeyValue] -> [KeyValue]
+normalizeWindowsEntries entries =
+  let parsedEntries = parseEnvContents (renderEnvFile entries)
+  in if null parsedEntries then initialWindowsEntries else parsedEntries
+
+deriveTaskEntries :: FilePath -> [KeyValue] -> [KeyValue]
+deriveTaskEntries commandFifo windowsEntries =
+  [ ("NSCDE_TASK_COUNT", lookupEntry "NSCDE_WINDOW_COUNT" "0" windowsEntries)
+  , ("NSCDE_TASK_FOCUSED", lookupEntry "NSCDE_FOCUSED_WINDOW" "" windowsEntries)
+  , ("NSCDE_TASK_COMMAND_FIFO", commandFifo)
+  ]
+
+publishWorkspaceLikeState :: [KeyValue] -> RuntimeState -> IO RuntimeTransition
+publishWorkspaceLikeState entries runtimeState = do
+  let normalizedEntries = normalizeWorkspaceEntries entries
+      publishedWorkspaces = publishedWorkspaceNames normalizedEntries
+      resolvedWorkspaces =
+        if null publishedWorkspaces
+          then runtimeWorkspaces runtimeState
+          else publishedWorkspaces
+      resolvedCurrent =
+        resolvePublishedCurrentWorkspace
+          normalizedEntries
+          resolvedWorkspaces
+          (runtimeCurrentWorkspace runtimeState)
+      updatedState =
+        runtimeState
+          { runtimeWorkspaces = resolvedWorkspaces
+          , runtimeCurrentWorkspace = resolvedCurrent
+          }
+  syncedState <- refreshBackdropEntries updatedState
+  pure $
+    RuntimeTransition
+      { runtimeTransitionState = syncedState
+      , runtimeTransitionTopics = changedWorkspaceTopics
+      , runtimeTransitionEffects = []
+      , runtimeTransitionMessage = "state published"
+      }
+
+normalizeWorkspaceEntries :: [KeyValue] -> [KeyValue]
+normalizeWorkspaceEntries entries =
+  let parsedEntries = parseEnvContents (renderEnvFile entries)
+  in if null parsedEntries then [] else parsedEntries
+
+publishedWorkspaceNames :: [KeyValue] -> [String]
+publishedWorkspaceNames entries =
+  case splitCommaList (lookupEntry "NSCDE_WORKSPACES" "" entries) of
+    [] -> splitCommaList (lookupEntry "NSCDE_PAGER_WORKSPACES" "" entries)
+    names -> names
+
+resolvePublishedCurrentWorkspace :: [KeyValue] -> [String] -> String -> String
+resolvePublishedCurrentWorkspace entries workspaceNames fallbackCurrent
+  | null workspaceNames = fallbackCurrent
+  | requestedCurrent `elem` workspaceNames = requestedCurrent
+  | fallbackCurrent `elem` workspaceNames = fallbackCurrent
+  | otherwise =
+      case workspaceNames of
+        firstWorkspace:_ -> firstWorkspace
+        [] -> fallbackCurrent
+  where
+    requestedCurrent =
+      firstNonEmpty
+        [ lookupEntry "NSCDE_CURRENT_WORKSPACE" "" entries
+        , lookupEntry "NSCDE_PAGER_CURRENT" "" entries
+        ]
+
+firstNonEmpty :: [String] -> String
+firstNonEmpty [] = ""
+firstNonEmpty (candidate:rest)
+  | null candidate = firstNonEmpty rest
+  | otherwise = candidate
+
+lookupEntry :: String -> String -> [KeyValue] -> String
+lookupEntry _ fallback [] = fallback
+lookupEntry key fallback ((candidateKey, value):rest)
+  | key == candidateKey = value
+  | otherwise = lookupEntry key fallback rest
+
+findExecutableInPath :: FilePath -> String -> IO (Maybe FilePath)
+findExecutableInPath searchPath executableName =
+  firstExistingExecutable (candidatePaths searchPath)
+  where
+    candidatePaths pathValue =
+      [ dir </> executableName
+      | dir <- splitSearchPath pathValue
+      , not (null dir)
+      ]
+
+    firstExistingExecutable [] = pure Nothing
+    firstExistingExecutable (candidate:rest) = do
+      exists <- doesFileExist candidate
+      if exists
+        then pure (Just candidate)
+        else firstExistingExecutable rest
+
+splitSearchPath :: FilePath -> [FilePath]
+splitSearchPath "" = []
+splitSearchPath pathValue =
+  case break (== ':') pathValue of
+    (segment, ':' : rest) -> segment : splitSearchPath rest
+    (segment, _) -> [segment]
 
 applyResolvedRuntimeStyleState :: RuntimeState -> StyleStore.ResolvedStyleState -> IO ()
 applyResolvedRuntimeStyleState runtimeState resolvedStyle =
@@ -450,6 +699,29 @@ applyResolvedRuntimeStyleState runtimeState resolvedStyle =
         resolvedStyle
       reloadBackend runtimeState
     _ -> pure ()
+
+performRuntimeTransitionEffects :: RuntimeTransition -> IO String
+performRuntimeTransitionEffects transition = do
+  effectStatuses <- mapM (performRuntimeEffect (runtimeTransitionState transition)) (runtimeTransitionEffects transition)
+  let failedEffects = filter (not . fst) effectStatuses
+  pure $
+    case failedEffects of
+      [] -> runtimeTransitionMessage transition
+      _ -> runtimeTransitionMessage transition ++ " (compat bridge unavailable)"
+
+performRuntimeEffect :: RuntimeState -> RuntimeEffect -> IO (Bool, RuntimeEffect)
+performRuntimeEffect runtimeState effect =
+  case effect of
+    RuntimeEffectCompatCommand fifoPath commandLine -> do
+      success <- writeCompatCommand fifoPath commandLine
+      pure (success, effect)
+    RuntimeEffectApplyResolvedStyle resolvedStyle -> do
+      writeBackdropOutputs runtimeState
+      applyResolvedRuntimeStyleState runtimeState resolvedStyle
+      pure (True, effect)
+    RuntimeEffectReloadBackend -> do
+      reloadBackend runtimeState
+      pure (True, effect)
 
 runtimeStyleContext :: RuntimeState -> RuntimeStyleContext
 runtimeStyleContext runtimeState =

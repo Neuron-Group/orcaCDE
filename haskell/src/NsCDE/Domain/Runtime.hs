@@ -20,6 +20,7 @@ data RuntimeTopic
   | TopicPanel
   | TopicPanelLayout
   | TopicWorkspaces
+  | TopicBackdrops
   | TopicWindows
   | TopicSubpanels
   | TopicPager
@@ -40,6 +41,7 @@ data RuntimeCommand
   = CommandWorkspaceSwitch String
   | CommandWorkspaceRename String String
   | CommandWindow RuntimeWindowCommand Int
+  | CommandPublishState RuntimeTopic [KeyValue]
   | CommandStyleSet [KeyValue] Bool
   | CommandStyleApply
   | CommandReload
@@ -90,6 +92,7 @@ renderRuntimeTopic topic =
     TopicPanel -> "panel"
     TopicPanelLayout -> "panel-layout"
     TopicWorkspaces -> "workspaces"
+    TopicBackdrops -> "backdrops"
     TopicWindows -> "windows"
     TopicSubpanels -> "subpanels"
     TopicPager -> "pager"
@@ -104,6 +107,7 @@ parseRuntimeTopic rawTopic =
     "panel" -> Just TopicPanel
     "panel-layout" -> Just TopicPanelLayout
     "workspaces" -> Just TopicWorkspaces
+    "backdrops" -> Just TopicBackdrops
     "windows" -> Just TopicWindows
     "subpanels" -> Just TopicSubpanels
     "pager" -> Just TopicPager

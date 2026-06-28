@@ -13,7 +13,7 @@ import NsCDE.Backend.Labwc.SessionFiles (renderAutostart, renderEnvironment, ren
 import NsCDE.Backend.Labwc.Theme (labwcThemeDir, writeLabwcTheme)
 import NsCDE.Domain.Runtime
 import NsCDE.Foundation.Common (writeAtomicFile)
-import NsCDE.Foundation.EnvFile (renderEnvFile)
+import NsCDE.Foundation.EnvFile (parseEnvContents, renderEnvFile)
 import NsCDE.Foundation.Paths (RuntimePaths(..), resolveRuntimePaths)
 import NsCDE.Foundation.Settings (lookupText)
 import NsCDE.Parse.AppMenus (loadAppMenuEntries)
@@ -22,7 +22,7 @@ import NsCDE.Policy.Keybinds (buildKeybinds, resolveTerminal)
 import NsCDE.Policy.Menu (buildMenuModel)
 import NsCDE.Policy.PanelLayout (emitPanelLayout, loadStaticPanelProfile)
 import NsCDE.Policy.SessionPlan (buildRcConfig, buildRcInputFromEnv, buildSessionPlan)
-import NsCDE.Runtime.Daemon (runCtl, runDaemon, runQuery)
+import NsCDE.Runtime.Daemon (runCtl, runDaemon, runPublishState, runQuery, runSubscribe)
 import NsCDE.Store.StyleState (readStyleState)
 
 main :: IO ()
@@ -38,12 +38,16 @@ main = do
       runCtl (CommandStyleSet [(key, value)] False)
     ["ctl", "style-apply"] ->
       runCtl CommandStyleApply
+    ["ctl", "publish-state", topicText] ->
+      publishState topicText
     ["ctl", "reload"] ->
       runCtl CommandReload
     ["ctl", "window", windowCommandText, windowIdText] ->
       publishWindowCtl windowCommandText windowIdText
     ["query", topicText] ->
       publishQuery topicText
+    ["subscribe", topicsText] ->
+      publishSubscribe topicsText
     ["panel-layout", "publish"] -> publishPanelLayout Nothing
     ["panel-layout", "publish", staticPath] -> publishPanelLayout (Just staticPath)
     ["labwc-menu", "publish", configDir] -> publishLabwcMenuXml configDir
@@ -57,9 +61,11 @@ main = do
       hPutStrLn stderr "       nscde-runtime ctl workspace-rename OLD NEW"
       hPutStrLn stderr "       nscde-runtime ctl style-set KEY VALUE"
       hPutStrLn stderr "       nscde-runtime ctl style-apply"
+      hPutStrLn stderr "       nscde-runtime ctl publish-state TOPIC"
       hPutStrLn stderr "       nscde-runtime ctl window <activate|close|minimize|restore|maximize> ID"
       hPutStrLn stderr "       nscde-runtime ctl reload"
-      hPutStrLn stderr "       nscde-runtime query <session|panel|panel-layout|workspaces|windows|subpanels|pager|taskd|capabilities|style>"
+      hPutStrLn stderr "       nscde-runtime query <session|panel|panel-layout|workspaces|backdrops|windows|subpanels|pager|taskd|capabilities|style>"
+      hPutStrLn stderr "       nscde-runtime subscribe <topic[,topic...]>"
       hPutStrLn stderr "Usage: nscde-runtime panel-layout publish [STATIC_PANEL_LAYOUT_FILE]"
       hPutStrLn stderr "       nscde-runtime labwc-menu publish CONFIG_DIR"
       hPutStrLn stderr "       nscde-runtime labwc-keybinds publish"
@@ -142,6 +148,16 @@ publishWindowCtl windowCommandText windowIdText =
           hPutStrLn stderr ("Invalid window id: " ++ windowIdText)
           exitFailure
 
+publishState :: String -> IO ()
+publishState topicText =
+  case parseRuntimeTopic topicText of
+    Just topic -> do
+      contents <- getContents
+      runPublishState topic (parseEnvContents contents)
+    Nothing -> do
+      hPutStrLn stderr ("Unsupported publish topic: " ++ topicText)
+      exitFailure
+
 publishQuery :: String -> IO ()
 publishQuery topicText =
   case parseRuntimeTopic topicText of
@@ -149,6 +165,35 @@ publishQuery topicText =
     Nothing -> do
       hPutStrLn stderr ("Unsupported query topic: " ++ topicText)
       exitFailure
+
+publishSubscribe :: String -> IO ()
+publishSubscribe topicsText =
+  let topics = parseTopics topicsText
+  in if null topics
+       then do
+         hPutStrLn stderr ("Unsupported subscribe topic list: " ++ topicsText)
+         exitFailure
+       else runSubscribe topics
+
+parseTopics :: String -> [RuntimeTopic]
+parseTopics [] = []
+parseTopics rawText =
+  mapMaybe parseRuntimeTopic (splitOnComma rawText)
+
+splitOnComma :: String -> [String]
+splitOnComma [] = [""]
+splitOnComma (',':rest) = "" : splitOnComma rest
+splitOnComma (char:rest) =
+  case splitOnComma rest of
+    [] -> [[char]]
+    token:tokens -> (char : token) : tokens
+
+mapMaybe :: (a -> Maybe b) -> [a] -> [b]
+mapMaybe _ [] = []
+mapMaybe fn (value:rest) =
+  case fn value of
+    Just result -> result : mapMaybe fn rest
+    Nothing -> mapMaybe fn rest
 
 readOptionalFile :: FilePath -> IO String
 readOptionalFile "" = pure ""

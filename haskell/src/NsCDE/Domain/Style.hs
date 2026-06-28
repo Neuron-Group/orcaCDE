@@ -1,12 +1,18 @@
 module NsCDE.Domain.Style
   ( FocusPolicy(..)
+  , DeskBackdrop(..)
   , IconFill(..)
   , IconPlacement(..)
   , IconSize(..)
   , StyleState(..)
   , defaultStyleState
+  , lookupDeskBackdrop
+  , styleBackdropDesk1Image
+  , styleBackdropDesk1Mode
   , styleSelectedPaletteFile
   ) where
+
+import NsCDE.Domain.Backdrop (BackdropMode, renderBackdropMode)
 
 data FocusPolicy
   = MouseFocus
@@ -25,6 +31,12 @@ data IconFill
   | IconFillBottomRight
   | IconFillTopRight
   deriving (Eq, Show)
+
+data DeskBackdrop = DeskBackdrop
+  { deskBackdropDesk :: Int
+  , deskBackdropMode :: Maybe BackdropMode
+  , deskBackdropImage :: String
+  } deriving (Eq, Show)
 
 data IconSize = IconSize
   { styleIconDefaultWidth :: Int
@@ -58,8 +70,7 @@ data StyleState = StyleState
   , styleFontsetName :: String
   , styleFontVariableNormalMedium :: String
   , styleFontMonospacedNormalMedium :: String
-  , styleBackdropDesk1Mode :: String
-  , styleBackdropDesk1Image :: String
+  , styleDeskBackdrops :: [DeskBackdrop]
   } deriving (Eq, Show)
 
 defaultStyleState :: StyleState
@@ -95,9 +106,32 @@ defaultStyleState =
     , styleFontsetName = ""
     , styleFontVariableNormalMedium = ""
     , styleFontMonospacedNormalMedium = ""
-    , styleBackdropDesk1Mode = ""
-    , styleBackdropDesk1Image = ""
+    , styleDeskBackdrops = []
     }
+
+lookupDeskBackdrop :: Int -> StyleState -> Maybe DeskBackdrop
+lookupDeskBackdrop deskNumber styleState =
+  go (styleDeskBackdrops styleState)
+  where
+    go [] = Nothing
+    go (backdrop:rest)
+      | deskBackdropDesk backdrop == deskNumber = Just backdrop
+      | otherwise = go rest
+
+styleBackdropDesk1Mode :: StyleState -> String
+styleBackdropDesk1Mode styleState =
+  case lookupDeskBackdrop 1 styleState of
+    Just backdrop ->
+      case deskBackdropMode backdrop of
+        Just mode -> renderBackdropMode mode
+        Nothing -> ""
+    Nothing -> ""
+
+styleBackdropDesk1Image :: StyleState -> String
+styleBackdropDesk1Image styleState =
+  case lookupDeskBackdrop 1 styleState of
+    Just backdrop -> deskBackdropImage backdrop
+    Nothing -> ""
 
 styleSelectedPaletteFile :: StyleState -> FilePath -> FilePath
 styleSelectedPaletteFile styleState fallbackPaletteFile

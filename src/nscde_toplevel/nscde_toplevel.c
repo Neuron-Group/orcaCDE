@@ -13,6 +13,7 @@
  * Licence: GPLv3
  */
 
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
+#include "../nscde_wayland_common/runtime-client.h"
 
 /* Forward declarations for protocol-generated types */
 struct zwlr_foreign_toplevel_manager_v1;
@@ -65,10 +68,7 @@ static struct {
 	char focused_app_id[MAX_APP_ID_LEN];
 	uint32_t focused_id;
 
-	/* State files */
 	char state_dir[PATH_MAX_LEN];
-	char windows_env_path[PATH_MAX_LEN];
-	char taskd_env_path[PATH_MAX_LEN];
 	char command_fifo_path[PATH_MAX_LEN];
 
 	/* Session FIFO for receiving commands */
@@ -152,89 +152,51 @@ remove_toplevel(struct zwlr_foreign_toplevel_handle_v1 *handle)
 	}
 }
 
-/* Write windows.env state file */
-static void
-write_windows_env(void)
-{
-	FILE *f;
-	char tmp_path[PATH_MAX_LEN + 4];
-
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", toplevel_state.windows_env_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
-		fprintf(stderr, "nscde_toplevel: cannot write %s: %s\n",
-		    tmp_path, strerror(errno));
-		return;
-	}
-
-	fprintf(f, "NSCDE_WINDOW_COUNT=%d\n", toplevel_state.toplevel_count);
-	fprintf(f, "NSCDE_FOCUSED_WINDOW=%u\n", toplevel_state.focused_id);
-	fprintf(f, "NSCDE_FOCUSED_TITLE=%s\n", toplevel_state.focused_title);
-	fprintf(f, "NSCDE_FOCUSED_APP_ID=%s\n", toplevel_state.focused_app_id);
-	fprintf(f, "NSCDE_TASKD_COMMAND_FIFO=%s\n", toplevel_state.command_fifo_path);
-
-	/* Write per-window entries */
-	for (int i = 0; i < toplevel_state.toplevel_count; i++) {
-		if (toplevel_state.toplevels[i].valid) {
-			fprintf(f, "NSCDE_WINDOW_%d_TITLE=%s\n", i,
-			    toplevel_state.toplevels[i].title);
-			fprintf(f, "NSCDE_WINDOW_%d_APP_ID=%s\n", i,
-			    toplevel_state.toplevels[i].app_id);
-			fprintf(f, "NSCDE_WINDOW_%d_MAXIMIZED=%d\n", i,
-			    toplevel_state.toplevels[i].maximized ? 1 : 0);
-			fprintf(f, "NSCDE_WINDOW_%d_MINIMIZED=%d\n", i,
-			    toplevel_state.toplevels[i].minimized ? 1 : 0);
-			fprintf(f, "NSCDE_WINDOW_%d_ACTIVATED=%d\n", i,
-			    toplevel_state.toplevels[i].activated ? 1 : 0);
-			fprintf(f, "NSCDE_WINDOW_%d_FULLSCREEN=%d\n", i,
-			    toplevel_state.toplevels[i].fullscreen ? 1 : 0);
-		}
-	}
-
-	fclose(f);
-
-	/* Atomic rename */
-	if (rename(tmp_path, toplevel_state.windows_env_path) != 0) {
-		fprintf(stderr, "nscde_toplevel: cannot rename %s: %s\n",
-		    tmp_path, strerror(errno));
-	}
-}
-
-/* Write taskd.env state file */
-static void
-write_taskd_env(void)
-{
-	FILE *f;
-	char tmp_path[PATH_MAX_LEN + 4];
-
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", toplevel_state.taskd_env_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
-		fprintf(stderr, "nscde_toplevel: cannot write %s: %s\n",
-		    tmp_path, strerror(errno));
-		return;
-	}
-
-	fprintf(f, "NSCDE_TASKD_WINDOW_COUNT=%d\n", toplevel_state.toplevel_count);
-	fprintf(f, "NSCDE_TASKD_FOCUSED_ID=%u\n", toplevel_state.focused_id);
-	fprintf(f, "NSCDE_TASKD_FOCUSED_TITLE=%s\n", toplevel_state.focused_title);
-	fprintf(f, "NSCDE_TASKD_FOCUSED_APP_ID=%s\n", toplevel_state.focused_app_id);
-	fprintf(f, "NSCDE_TASKD_COMMAND_FIFO=%s\n", toplevel_state.command_fifo_path);
-
-	fclose(f);
-
-	/* Atomic rename */
-	if (rename(tmp_path, toplevel_state.taskd_env_path) != 0) {
-		fprintf(stderr, "nscde_toplevel: cannot rename %s: %s\n",
-		    tmp_path, strerror(errno));
-	}
-}
-
 /* Update all state files */
 static void
 update_state(void)
 {
-	write_windows_env();
+	FILE *stream;
+	char *contents = NULL;
+	size_t contents_size = 0;
+
+	stream = open_memstream(&contents, &contents_size);
+	if (!stream) {
+		fprintf(stderr, "nscde_toplevel: cannot allocate state buffer: %s\n",
+		    strerror(errno));
+		return;
+	}
+
+	fprintf(stream, "NSCDE_WINDOW_COUNT=%d\n", toplevel_state.toplevel_count);
+	fprintf(stream, "NSCDE_FOCUSED_WINDOW=%u\n", toplevel_state.focused_id);
+	fprintf(stream, "NSCDE_FOCUSED_TITLE=%s\n", toplevel_state.focused_title);
+	fprintf(stream, "NSCDE_FOCUSED_APP_ID=%s\n", toplevel_state.focused_app_id);
+	fprintf(stream, "NSCDE_TASKD_COMMAND_FIFO=%s\n", toplevel_state.command_fifo_path);
+
+	for (int i = 0; i < toplevel_state.toplevel_count; i++) {
+		if (toplevel_state.toplevels[i].valid) {
+			fprintf(stream, "NSCDE_WINDOW_%d_TITLE=%s\n", i,
+			    toplevel_state.toplevels[i].title);
+			fprintf(stream, "NSCDE_WINDOW_%d_APP_ID=%s\n", i,
+			    toplevel_state.toplevels[i].app_id);
+			fprintf(stream, "NSCDE_WINDOW_%d_MAXIMIZED=%d\n", i,
+			    toplevel_state.toplevels[i].maximized ? 1 : 0);
+			fprintf(stream, "NSCDE_WINDOW_%d_MINIMIZED=%d\n", i,
+			    toplevel_state.toplevels[i].minimized ? 1 : 0);
+			fprintf(stream, "NSCDE_WINDOW_%d_ACTIVATED=%d\n", i,
+			    toplevel_state.toplevels[i].activated ? 1 : 0);
+			fprintf(stream, "NSCDE_WINDOW_%d_FULLSCREEN=%d\n", i,
+			    toplevel_state.toplevels[i].fullscreen ? 1 : 0);
+		}
+	}
+
+	fclose(stream);
+
+	if (!nscde_runtime_publish_topic("windows", contents ? contents : "")) {
+		fprintf(stderr, "nscde_toplevel: failed to publish runtime windows state\n");
+	}
+
+	free(contents);
 	toplevel_state.dirty = false;
 }
 
@@ -531,25 +493,28 @@ process_fifo_commands(void)
 static void
 init_paths(void)
 {
+	const char *state_dir = getenv("NSCDE_STATE_DIR");
 	const char *xdg_cache = getenv("XDG_CACHE_HOME");
 	char cache_dir[512];
 
-	if (xdg_cache) {
+	if (state_dir && state_dir[0]) {
+		snprintf(toplevel_state.state_dir,
+		    sizeof(toplevel_state.state_dir), "%s", state_dir);
+		toplevel_state.state_dir[sizeof(toplevel_state.state_dir) - 1] = '\0';
+	} else if (xdg_cache) {
 		snprintf(cache_dir, sizeof(cache_dir), "%s", xdg_cache);
+		snprintf(toplevel_state.state_dir, sizeof(toplevel_state.state_dir),
+		    "%s/nscde-stage1", cache_dir);
 	} else {
 		const char *home = getenv("HOME");
 		if (!home) {
 			home = "/tmp";
 		}
 		snprintf(cache_dir, sizeof(cache_dir), "%s/.cache", home);
+		snprintf(toplevel_state.state_dir, sizeof(toplevel_state.state_dir),
+		    "%s/nscde-stage1", cache_dir);
 	}
 
-	snprintf(toplevel_state.state_dir, sizeof(toplevel_state.state_dir),
-	    "%s/nscde-stage1", cache_dir);
-	snprintf(toplevel_state.windows_env_path, sizeof(toplevel_state.windows_env_path),
-	    "%s/windows.env", toplevel_state.state_dir);
-	snprintf(toplevel_state.taskd_env_path, sizeof(toplevel_state.taskd_env_path),
-	    "%s/taskd.env", toplevel_state.state_dir);
 	snprintf(toplevel_state.command_fifo_path, sizeof(toplevel_state.command_fifo_path),
 	    "%s/topleveld.fifo", toplevel_state.state_dir);
 }
@@ -773,8 +738,8 @@ main(int argc, char *argv[])
 			break;
 		}
 
-		/* Poll for events */
-		int ret = poll(fds, nfds, 1000);
+		/* Poll until the Wayland socket or command FIFO becomes readable. */
+		int ret = poll(fds, nfds, -1);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				if (caught_signal) {
@@ -791,15 +756,6 @@ main(int argc, char *argv[])
 			break;
 		}
 
-		if (ret == 0) {
-			/* Timeout - check for state updates */
-			wl_display_cancel_read(toplevel_state.display);
-			if (toplevel_state.dirty) {
-				update_state();
-			}
-			continue;
-		}
-
 		/* Handle Wayland events */
 		if (fds[0].revents & POLLIN) {
 			if (wl_display_read_events(toplevel_state.display) < 0) {
@@ -811,6 +767,9 @@ main(int argc, char *argv[])
 				fprintf(stderr, "nscde_toplevel: dispatch failed\n");
 				toplevel_state.running = false;
 				break;
+			}
+			if (toplevel_state.dirty) {
+				update_state();
 			}
 		} else {
 			wl_display_cancel_read(toplevel_state.display);

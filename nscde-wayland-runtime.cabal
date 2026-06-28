@@ -13,7 +13,9 @@ library
     , NsCDE.Backend.Labwc.StyleApply
     , NsCDE.Backend.Labwc.Theme
     , NsCDE.Domain.Keybinds
+    , NsCDE.Domain.Keymap
     , NsCDE.Domain.Menu
+    , NsCDE.Domain.Backdrop
     , NsCDE.Domain.Palette
     , NsCDE.Domain.PanelLayout
     , NsCDE.Domain.Runtime
@@ -32,6 +34,7 @@ library
     , NsCDE.Parse.Subpanels
     , NsCDE.Policy.Backdrop
     , NsCDE.Policy.Keybinds
+    , NsCDE.Policy.Keymap
     , NsCDE.Policy.Menu
     , NsCDE.Policy.PanelLayout
     , NsCDE.Policy.SessionPlan
@@ -39,6 +42,7 @@ library
     , NsCDE.Runtime.Daemon
     , NsCDE.Runtime.Protocol
     , NsCDE.Runtime.State
+    , NsCDE.Store.BackdropState
     , NsCDE.Store.StyleState
   build-depends:
       base >=4.14 && <5
@@ -71,6 +75,8 @@ test-suite runtime-tests
   build-depends:
       base >=4.14 && <5
     , HUnit
+    , directory
+    , filepath
     , network
     , nscde-wayland-runtime
     , process

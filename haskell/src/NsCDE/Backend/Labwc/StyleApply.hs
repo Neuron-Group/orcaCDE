@@ -19,39 +19,13 @@ import NsCDE.Foundation.Common (writeAtomicFile)
 import NsCDE.Foundation.EnvFile (KeyValue)
 import NsCDE.Parse.PaletteDp (loadPaletteColors)
 import NsCDE.Parse.StyleMgrIni (lookupIniFlag)
-import NsCDE.Policy.Backdrop (resolveBackdropPath)
 import NsCDE.Policy.SessionPlan (buildRcConfig)
 
 applyLabwcStyle :: RuntimeStyleContext -> FilePath -> StyleState -> IO ()
 applyLabwcStyle runtimeContext palettePath styleState = do
   regenerateLabwcRc runtimeContext styleState
   regenerateLabwcTheme runtimeContext palettePath
-  applyLabwcBackdrop runtimeContext styleState palettePath
   applyLabwcFonts runtimeContext styleState
-
-applyLabwcBackdrop :: RuntimeStyleContext -> StyleState -> FilePath -> IO ()
-applyLabwcBackdrop runtimeContext styleState palettePath = do
-  let backdropMode = trimWhitespace (styleBackdropDesk1Mode styleState)
-      backdropImage = trimWhitespace (styleBackdropDesk1Image styleState)
-      backdropHelper = runtimeStyleToolsDir runtimeContext </> "nscde_labwc_bg"
-  backdropPath <-
-    resolveBackdropPath
-      (runtimeStyleFvwmUserDir runtimeContext)
-      (runtimeStyleDataDir runtimeContext)
-      backdropMode
-      backdropImage
-  let helperEnvironment =
-        runtimeBaseEnvironment runtimeContext ++
-          [ ("NSCDE_PALETTE_FILE", palettePath)
-          | not (null palettePath)
-          ] ++
-          [ ("NSCDE_BACKDROP_IMAGE", path)
-          | Just path <- [backdropPath]
-          ] ++
-          [ ("NSCDE_BACKDROP_MODE", backdropMode)
-          | not (null backdropMode) && backdropPath /= Nothing
-          ]
-  spawnExecutable helperEnvironment backdropHelper []
 
 applyLabwcFonts :: RuntimeStyleContext -> StyleState -> IO ()
 applyLabwcFonts runtimeContext styleState = do

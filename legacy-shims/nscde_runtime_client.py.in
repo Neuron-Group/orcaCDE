@@ -2,7 +2,11 @@
 
 import os
 import socket
-import subprocess
+
+try:
+    from PyQt5.QtCore import QSocketNotifier
+except ImportError:
+    QSocketNotifier = None
 
 
 PALETTE_KEYS = [
@@ -79,7 +83,10 @@ def pager_fifo_path():
 
 
 def toplevel_fifo_path():
-    state = query_state("windows", windows_env_path())
+    state = query_state("windows")
+    fifo = state.get("NSCDE_TASK_COMMAND_FIFO", "")
+    if fifo:
+        return fifo
     fifo = state.get("NSCDE_TASKD_COMMAND_FIFO", "")
     if fifo:
         return fifo
@@ -113,7 +120,9 @@ def runtime_socket_path():
 
 
 def render_env_frame(entries):
-    return "".join("{}={}\n".format(key, value) for key, value in entries.items()) + "\n"
+    return "".join(
+        "{}={}\n".format(key, value) for key, value in _iter_entries(entries)
+    ) + "\n"
 
 
 def runtime_request_frame(entries):
@@ -131,7 +140,7 @@ def runtime_request_frame(entries):
                 break
         client.close()
     except (FileNotFoundError, OSError):
-        return {}
+        return None
 
     payload = b"".join(chunks).decode("utf-8", errors="replace")
     frame_text = payload.split("\n\n", 1)[0]
@@ -139,32 +148,28 @@ def runtime_request_frame(entries):
 
 
 def runtime_query_state(topic):
-    try:
-        result = subprocess.run(
-            [runtime_bin(), "query", topic],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-    except (FileNotFoundError, OSError):
-        return {}
-    if result.returncode != 0:
-        return {}
-    return parse_env_contents(result.stdout)
+    response = runtime_request_frame({
+        "TYPE": "query",
+        "TOPIC": topic,
+    })
+    if response is None:
+        return None
+    if response.get("TYPE", "") != "state":
+        return None
+    response_topic = response.get("TOPIC", "")
+    if response_topic and response_topic != topic:
+        return None
+    return strip_meta(response)
 
 
 def runtime_ctl(*args):
-    try:
-        result = subprocess.run(
-            [runtime_bin(), "ctl"] + list(args),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-    except (FileNotFoundError, OSError):
+    frame = build_runtime_ctl_frame(args)
+    if not frame:
         return False
-    return result.returncode == 0
+    response = runtime_request_frame(frame)
+    if response is None:
+        return False
+    return response.get("TYPE", "") == "ack"
 
 
 def runtime_style_set(style_values, apply=False):
@@ -175,6 +180,8 @@ def runtime_style_set(style_values, apply=False):
     }
     frame.update(style_values)
     response = runtime_request_frame(frame)
+    if response is None:
+        return False
     return response.get("TYPE", "") == "ack"
 
 
@@ -183,32 +190,206 @@ def runtime_style_apply():
         "TYPE": "command",
         "NAME": "style-apply",
     })
+    if response is None:
+        return False
     return response.get("TYPE", "") == "ack"
 
 
-def query_state(topic, fallback_path=""):
+def query_state(topic):
     state = runtime_query_state(topic)
-    if state:
-        return state
-    if fallback_path:
-        return parse_env_file(fallback_path)
-    return {}
+    if state is None:
+        raise RuntimeUnavailableError(
+            "Unable to query runtime topic '{}' via {}".format(
+                topic, runtime_socket_path()
+            )
+        )
+    return state
 
 
 def panel_state():
-    return query_state("panel", panel_env_path())
+    return query_state("panel")
 
 
 def style_state():
-    return query_state("style", style_env_path())
+    return query_state("style")
 
 
 def workspaces_state():
-    return query_state("workspaces", workspaces_env_path())
+    return query_state("workspaces")
 
 
 def windows_state():
-    return query_state("windows", windows_env_path())
+    return query_state("windows")
+
+
+def split_topic_list(topics):
+    if isinstance(topics, str):
+        raw_topics = topics.split(",")
+    else:
+        raw_topics = list(topics)
+    return [topic.strip() for topic in raw_topics if topic and topic.strip()]
+
+
+def runtime_subscribe_socket(topics):
+    topic_list = split_topic_list(topics)
+    if not topic_list:
+        raise OSError("no topics requested")
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    client.connect(runtime_socket_path())
+    client.sendall(render_env_frame({
+        "TYPE": "subscribe",
+        "TOPICS": ",".join(topic_list),
+    }).encode("utf-8"))
+    client.setblocking(False)
+    return client
+
+
+class RuntimeSubscription(object):
+    def __init__(self, topics, parent=None):
+        if QSocketNotifier is None:
+            raise RuntimeError("PyQt5 QtCore is required for runtime subscriptions")
+        self._topics = split_topic_list(topics)
+        self._parent = parent
+        self._socket = None
+        self._notifier = None
+        self._buffer = b""
+        self._cache = {}
+        self._topic_handlers = {}
+        self._frame_handlers = []
+        self._closed = False
+        self._connect()
+
+    def close(self):
+        self._closed = True
+        self._teardown_socket()
+
+    def on_frame(self, handler):
+        self._frame_handlers.append(handler)
+
+    def on_topic(self, topic, handler):
+        topic_key = topic.strip()
+        self._topic_handlers.setdefault(topic_key, []).append(handler)
+        cached = self._cache.get(topic_key)
+        if cached is not None:
+            handler(cached)
+
+    def state(self, topic):
+        cached = self._cache.get(topic)
+        if cached is not None:
+            return dict(cached)
+        return query_state(topic)
+
+    def _connect(self):
+        if self._closed:
+            return False
+        self._teardown_socket()
+        try:
+            self._socket = runtime_subscribe_socket(self._topics)
+        except OSError:
+            self._socket = None
+            raise RuntimeUnavailableError(
+                "Unable to subscribe to runtime topics '{}' via {}".format(
+                    ",".join(self._topics), runtime_socket_path()
+                )
+            )
+
+        self._buffer = b""
+        self._notifier = QSocketNotifier(
+            self._socket.fileno(), QSocketNotifier.Read, self._parent
+        )
+        self._notifier.activated.connect(self._on_ready_read)
+        return True
+
+    def _teardown_socket(self):
+        if self._notifier is not None:
+            self._notifier.setEnabled(False)
+            self._notifier.deleteLater()
+            self._notifier = None
+        if self._socket is not None:
+            try:
+                self._socket.close()
+            except OSError:
+                pass
+            self._socket = None
+
+    def _disconnect(self):
+        self._teardown_socket()
+        if not self._closed:
+            self._handle_runtime_failure(
+                RuntimeDisconnectedError(
+                    "Runtime subscription disconnected for topics '{}'".format(
+                        ",".join(self._topics)
+                    )
+                )
+            )
+
+    def _on_ready_read(self, _fd):
+        if self._socket is None:
+            return
+        while True:
+            try:
+                chunk = self._socket.recv(4096)
+            except BlockingIOError:
+                break
+            except InterruptedError:
+                continue
+            except OSError:
+                self._disconnect()
+                return
+
+            if not chunk:
+                self._disconnect()
+                return
+            self._buffer += chunk
+
+        self._drain_frames()
+
+    def _drain_frames(self):
+        while b"\n\n" in self._buffer:
+            frame_bytes, _, rest = self._buffer.partition(b"\n\n")
+            self._buffer = rest
+            frame = parse_env_contents(frame_bytes.decode("utf-8", errors="replace"))
+            if not frame:
+                continue
+            self._handle_frame(frame)
+
+    def _handle_frame(self, frame):
+        frame_type = frame.get("TYPE", "")
+        topic = frame.get("TOPIC", "")
+        payload = strip_meta(frame)
+
+        for handler in self._frame_handlers:
+            handler(frame_type, topic, dict(payload))
+
+        if frame_type != "state" or not topic:
+            if frame_type == "error":
+                self._teardown_socket()
+                if not self._closed:
+                    self._handle_runtime_failure(
+                        RuntimeDisconnectedError(
+                            "Runtime subscription error for '{}': {}".format(
+                                ",".join(self._topics),
+                                frame.get("MESSAGE", "unknown error"),
+                            )
+                        )
+                    )
+            return
+
+        self._cache[topic] = dict(payload)
+        for handler in self._topic_handlers.get(topic, []):
+            handler(dict(payload))
+
+    def _handle_runtime_failure(self, error):
+        if self._closed:
+            return
+        self._closed = True
+        if self._parent is not None:
+            show_runtime_error(self._parent, "Runtime Error", error)
+            close = getattr(self._parent, "close", None)
+            if callable(close):
+                close()
+            return
+        raise error
 
 
 def read_palette(state, palette_keys=PALETTE_KEYS, default_palette=DEFAULT_PALETTE):
@@ -220,3 +401,63 @@ def read_palette(state, palette_keys=PALETTE_KEYS, default_palette=DEFAULT_PALET
         else:
             palette.append(None)
     return [p or d for p, d in zip(palette, default_palette)]
+
+
+def strip_meta(entries):
+    return {
+        key: value
+        for key, value in entries.items()
+        if key not in ("TYPE", "TOPIC", "MESSAGE")
+    }
+
+
+def build_runtime_ctl_frame(args):
+    if not args:
+        return None
+
+    command = args[0]
+    if command == "workspace-switch" and len(args) == 2:
+        return {
+            "TYPE": "command",
+            "NAME": "workspace-switch",
+            "WORKSPACE": args[1],
+        }
+    if command == "workspace-rename" and len(args) == 3:
+        return {
+            "TYPE": "command",
+            "NAME": "workspace-rename",
+            "OLD": args[1],
+            "NEW": args[2],
+        }
+    if command == "reload" and len(args) == 1:
+        return {
+            "TYPE": "command",
+            "NAME": "reload",
+        }
+    if command == "window" and len(args) == 3:
+        return {
+            "TYPE": "command",
+            "NAME": "window-{}".format(args[1]),
+            "ID": args[2],
+        }
+    return None
+
+
+class RuntimeUnavailableError(RuntimeError):
+    pass
+
+
+class RuntimeDisconnectedError(RuntimeError):
+    pass
+
+
+def show_runtime_error(parent, title, error):
+    from PyQt5.QtWidgets import QMessageBox
+
+    QMessageBox.critical(parent, title, str(error))
+
+
+def _iter_entries(entries):
+    if hasattr(entries, "items"):
+        return entries.items()
+    return entries

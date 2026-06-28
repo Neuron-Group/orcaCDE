@@ -206,10 +206,13 @@ class NsCDEWindowMgr(QWidget):
         self.current_palette = list(DEFAULT_PALETTE)
         self.style_state = runtime_client.style_state()
         self._changed = {}
+        self._runtime_subscription = None
+        self._loading_state = False
 
         self._build_ui()
         self._apply_stylesheet()
         self._load_state()
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -503,6 +506,32 @@ class NsCDEWindowMgr(QWidget):
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "style"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic("style", self._handle_style_state)
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_style_state(self, state):
+        if self._loading_state:
+            return
+        self.style_state = dict(state)
+        self._load_state()
+
     def _on_tab_changed(self, index):
         for i in range(self.tab_layout.count()):
             w = self.tab_layout.itemAt(i).widget()
@@ -512,6 +541,7 @@ class NsCDEWindowMgr(QWidget):
             self._tabs[index].show()
 
     def _load_state(self):
+        self._loading_state = True
         s = self.style_state
 
         focus = s.get("NSCDE_FOCUS_POLICY", "MouseFocus")
@@ -581,6 +611,7 @@ class NsCDEWindowMgr(QWidget):
         self.edge_move_delay_slider.setValue(
             int(s.get("NSCDE_EDGE_MOVE_DELAY", "0"))
         )
+        self._loading_state = False
 
     def _get_focus_policy(self):
         if self.focus_click.isChecked():
@@ -665,12 +696,21 @@ class NsCDEWindowMgr(QWidget):
         self.style_state = {}
         self._load_state()
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
 
 def main():
     app = QApplication(sys.argv)
-    mgr = NsCDEWindowMgr()
-    mgr.show()
-    sys.exit(app.exec_())
+    try:
+        mgr = NsCDEWindowMgr()
+        mgr.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

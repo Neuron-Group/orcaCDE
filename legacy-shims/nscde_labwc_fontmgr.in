@@ -291,11 +291,13 @@ class NsCDEFontMgr(QWidget):
         self.selected_fontset_fonts = {}
         self.style_state = runtime_client.style_state()
         self.current_size_group = "MEDIUM"
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
         self._load_fontset_list()
         self._detect_current_fontset()
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -372,6 +374,30 @@ class NsCDEFontMgr(QWidget):
         pal = runtime_client.read_palette(state)
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
+
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "style"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic("style", self._handle_style_state)
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_style_state(self, state):
+        self.style_state = dict(state)
+        self._detect_current_fontset()
 
     def _load_fontset_list(self):
         self.fontset_list.clear()
@@ -513,12 +539,21 @@ class NsCDEFontMgr(QWidget):
             self.apply_btn.setEnabled(True)
             self.apply_btn.setText("Save")
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
 
 def main():
     app = QApplication(sys.argv)
-    mgr = NsCDEFontMgr()
-    mgr.show()
-    sys.exit(app.exec_())
+    try:
+        mgr = NsCDEFontMgr()
+        mgr.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

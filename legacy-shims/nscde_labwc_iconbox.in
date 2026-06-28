@@ -2,7 +2,7 @@
 
 import os
 import sys
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QApplication,
     QFrame,
@@ -199,14 +199,12 @@ class NsCDEIconBox(QWidget):
         self.current_palette = list(DEFAULT_PALETTE)
         self._buttons = []
         self._last_count = -1
+        self._runtime_subscription = None
 
         self._build_ui()
         self._apply_stylesheet()
         self._refresh_windows()
-
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self._refresh_windows)
-        self._timer.start(1000)
+        self._setup_runtime_subscription()
 
     def _build_ui(self):
         main_layout = QVBoxLayout(self)
@@ -243,8 +241,31 @@ class NsCDEIconBox(QWidget):
         self.current_palette = pal
         self.setStyleSheet(build_stylesheet(pal))
 
-    def _refresh_windows(self):
-        windows = read_windows()
+    def _setup_runtime_subscription(self):
+        try:
+            self._runtime_subscription = runtime_client.RuntimeSubscription(
+                ["panel", "windows"], self
+            )
+        except RuntimeError as err:
+            self._runtime_subscription = None
+            runtime_client.show_runtime_error(self, "Runtime Error", err)
+            self.close()
+            return
+
+        self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic("windows", self._handle_windows_state)
+
+    def _handle_panel_state(self, state):
+        pal = runtime_client.read_palette(state)
+        if pal != self.current_palette:
+            self.current_palette = pal
+            self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_windows_state(self, state):
+        self._refresh_windows(state)
+
+    def _refresh_windows(self, state=None):
+        windows = read_windows() if state is None else read_windows_from_state(state)
         iconified = [w for w in windows if w["minimized"]]
 
         current_count = len(iconified)
@@ -266,12 +287,41 @@ class NsCDEIconBox(QWidget):
                 self._buttons.append(btn)
                 self._icon_area.addWidget(btn)
 
+    def closeEvent(self, event):
+        if self._runtime_subscription is not None:
+            self._runtime_subscription.close()
+        super().closeEvent(event)
+
+
+def read_windows_from_state(state):
+    count = int(state.get("NSCDE_WINDOW_COUNT", "0"))
+    windows = []
+    for i in range(count):
+        title = state.get("NSCDE_WINDOW_{}_TITLE".format(i), "")
+        app_id = state.get("NSCDE_WINDOW_{}_APP_ID".format(i), "")
+        minimized = state.get("NSCDE_WINDOW_{}_MINIMIZED".format(i), "0") == "1"
+        maximized = state.get("NSCDE_WINDOW_{}_MAXIMIZED".format(i), "0") == "1"
+        activated = state.get("NSCDE_WINDOW_{}_ACTIVATED".format(i), "0") == "1"
+        windows.append({
+            "id": i,
+            "title": title,
+            "app_id": app_id,
+            "minimized": minimized,
+            "maximized": maximized,
+            "activated": activated,
+        })
+    return windows
+
 
 def main():
     app = QApplication(sys.argv)
-    iconbox = NsCDEIconBox()
-    iconbox.show()
-    sys.exit(app.exec_())
+    try:
+        iconbox = NsCDEIconBox()
+        iconbox.show()
+        sys.exit(app.exec_())
+    except RuntimeError as err:
+        runtime_client.show_runtime_error(None, "Runtime Error", err)
+        return 1
 
 
 if __name__ == "__main__":

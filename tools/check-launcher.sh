@@ -46,6 +46,8 @@ test -s "$THEME_MENU_ACTIVE_FILE"
 test -s "$THEME_CLOSE_2X_FILE"
 
 grep -q 'nscde_labwc_paneld' "$LABWC_CONFIG_DIR/autostart"
+grep -q 'nscde_backdropd' "$LABWC_CONFIG_DIR/autostart"
+! grep -q 'nscde_labwc_bg' "$LABWC_CONFIG_DIR/autostart"
 grep -q 'nscde-runtime.*daemon' "$LABWC_CONFIG_DIR/autostart"
 grep -q '<labwc_config>' "$LABWC_CONFIG_DIR/rc.xml"
 grep -q 'Style Manager' "$LABWC_CONFIG_DIR/menu.xml"

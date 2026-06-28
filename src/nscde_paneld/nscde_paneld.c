@@ -5,10 +5,10 @@
  * proper panel surface with exclusive zone reservation. It replaces the
  * stage-one PyQt5 placeholder with a native C layer-shell implementation.
  *
- * Prefers runtime socket query/subscribe for panel state when available,
- * with state-file/inotify fallback during the staged transition.
+ * Uses runtime socket query/subscribe as the owner-facing live state path.
+ * Compatibility env files remain outputs for transitional consumers only.
  * Writes workspace switch commands through the runtime control path first,
- * then falls back to the pager FIFO when needed.
+ * then falls back to the pager FIFO for compatibility command bridges.
  *
  * This file is a part of NsCDE - Not so Common Desktop Environment
  * Author: Hegel3DReloaded
@@ -420,7 +420,6 @@ static const struct motif_palette_slots default_palette_slots = {
 enum {
 	FD_WAYLAND,
 	FD_RUNTIME,
-	FD_INOTIFY,
 	FD_TIMER,
 	FD_SIGNAL,
 	NR_FDS,
@@ -484,13 +483,13 @@ static void parse_env_contents(const char *contents);
 static void parse_workspaces_env_contents(const char *contents);
 static void parse_subpanel_env_contents(const char *contents);
 static void parse_layout_env_contents(const char *contents);
-static void parse_all_state_files(void);
 static bool query_runtime_topic_and_parse(const char *topic,
 	state_contents_parser_fn parser);
-static void sync_state_from_best_source(void);
+static bool sync_runtime_state(void);
 static bool setup_runtime_subscription(void);
 static void teardown_runtime_subscription(void);
-static void apply_runtime_frame(const struct nscde_runtime_frame *frame);
+static void apply_runtime_frame(const struct nscde_runtime_frame *frame,
+	void *userdata);
 static void handle_runtime_subscription(void);
 static void refresh_state_transport(void);
 
@@ -999,15 +998,6 @@ parse_layout_env_file(void)
 	free(contents);
 }
 
-static void
-parse_all_state_files(void)
-{
-	parse_layout_env_file();
-	parse_env_file();
-	parse_workspaces_env_file();
-	parse_subpanel_env_file();
-}
-
 static bool
 query_runtime_topic_and_parse(const char *topic, state_contents_parser_fn parser)
 {
@@ -1025,24 +1015,21 @@ query_runtime_topic_and_parse(const char *topic, state_contents_parser_fn parser
 	return true;
 }
 
-static void
-sync_state_from_best_source(void)
+static bool
+sync_runtime_state(void)
 {
-	if (!query_runtime_topic_and_parse("panel-layout",
-		parse_layout_env_contents)) {
-		parse_layout_env_file();
-	}
-	if (!query_runtime_topic_and_parse("panel", parse_env_contents)) {
-		parse_env_file();
-	}
-	if (!query_runtime_topic_and_parse("workspaces",
-		parse_workspaces_env_contents)) {
-		parse_workspaces_env_file();
-	}
-	if (!query_runtime_topic_and_parse("subpanels",
-		parse_subpanel_env_contents)) {
-		parse_subpanel_env_file();
-	}
+	bool success = true;
+
+	success = query_runtime_topic_and_parse("panel-layout",
+		parse_layout_env_contents) && success;
+	success = query_runtime_topic_and_parse("panel", parse_env_contents)
+		&& success;
+	success = query_runtime_topic_and_parse("workspaces",
+		parse_workspaces_env_contents) && success;
+	success = query_runtime_topic_and_parse("subpanels",
+		parse_subpanel_env_contents) && success;
+
+	return success;
 }
 
 static bool
@@ -1073,8 +1060,10 @@ teardown_runtime_subscription(void)
 }
 
 static void
-apply_runtime_frame(const struct nscde_runtime_frame *frame)
+apply_runtime_frame(const struct nscde_runtime_frame *frame, void *userdata)
 {
+	(void)userdata;
+
 	if (!frame || frame->type != NSCDE_RUNTIME_FRAME_STATE ||
 		!frame->contents) {
 		return;
@@ -1094,34 +1083,20 @@ apply_runtime_frame(const struct nscde_runtime_frame *frame)
 static void
 handle_runtime_subscription(void)
 {
-	for (;;) {
-		struct nscde_runtime_frame frame = {0};
-		enum nscde_runtime_read_result result =
-			nscde_runtime_subscription_read(&panel.runtime_subscription,
-				&frame);
+	char error_message[NSCDE_RUNTIME_FIELD_LEN] = {0};
+	enum nscde_runtime_read_result result =
+		nscde_runtime_subscription_drain(&panel.runtime_subscription,
+			apply_runtime_frame, NULL, error_message,
+			sizeof(error_message));
 
-		if (result == NSCDE_RUNTIME_READ_FRAME) {
-			if (frame.type == NSCDE_RUNTIME_FRAME_ERROR) {
-				if (frame.message[0]) {
-					fprintf(stderr,
-						"nscde_paneld: runtime subscribe error: %s\n",
-						frame.message);
-				}
-				nscde_runtime_frame_destroy(&frame);
-				teardown_runtime_subscription();
-				parse_all_state_files();
-				break;
-			}
-			apply_runtime_frame(&frame);
-			nscde_runtime_frame_destroy(&frame);
-			continue;
-		}
-		if (result == NSCDE_RUNTIME_READ_CLOSED ||
-			result == NSCDE_RUNTIME_READ_ERROR) {
-			teardown_runtime_subscription();
-			parse_all_state_files();
-		}
-		break;
+	if (result == NSCDE_RUNTIME_READ_ERROR && error_message[0]) {
+		fprintf(stderr,
+			"nscde_paneld: runtime subscribe error: %s\n",
+			error_message);
+	}
+	if (result == NSCDE_RUNTIME_READ_CLOSED ||
+		result == NSCDE_RUNTIME_READ_ERROR) {
+		teardown_runtime_subscription();
 	}
 }
 
@@ -1132,10 +1107,19 @@ refresh_state_transport(void)
 		return;
 	}
 
-	sync_state_from_best_source();
-	if (setup_runtime_subscription()) {
-		handle_runtime_subscription();
+	if (!sync_runtime_state()) {
+		fprintf(stderr,
+			"nscde_paneld: unable to query one or more runtime topics\n");
+		panel.running = false;
+		return;
 	}
+	if (!setup_runtime_subscription()) {
+		fprintf(stderr,
+			"nscde_paneld: unable to subscribe to runtime topics\n");
+		panel.running = false;
+		return;
+	}
+	handle_runtime_subscription();
 }
 
 /* ---- Launcher button management ---- */
@@ -3912,49 +3896,7 @@ read_text_file(const char *path)
 }
 
 static void
-setup_inotify(void)
-{
-	pollfds[FD_INOTIFY].fd = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-	pollfds[FD_INOTIFY].events = POLLIN;
-
-	if (pollfds[FD_INOTIFY].fd < 0) {
-		fprintf(stderr, "nscde_paneld: inotify_init1 failed: %s\n",
-			strerror(errno));
-		return;
-	}
-
-	if (panel.state_dir[0]) {
-		int wd = inotify_add_watch(pollfds[FD_INOTIFY].fd,
-			panel.state_dir,
-			IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE);
-		if (wd < 0) {
-			fprintf(stderr,
-				"nscde_paneld: inotify_add_watch on %s failed: %s\n",
-				panel.state_dir, strerror(errno));
-		}
-	}
-}
-
-static void
-drain_inotify(void)
-{
-	char buf[4096]
-		__attribute__((aligned(__alignof__(struct inotify_event))));
-	for (;;) {
-		ssize_t len = read(pollfds[FD_INOTIFY].fd, buf, sizeof(buf));
-		if (len <= 0) {
-			break;
-		}
-		/*
-		 * We only need to know that something changed in the state
-		 * directory; individual event parsing is not required since
-		 * we unconditionally re-read both env files.
-		 */
-	}
-}
-
-static void
-setup_watchdog_timer(void)
+setup_applet_timer(void)
 {
 	pollfds[FD_TIMER].fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
 	pollfds[FD_TIMER].events = POLLIN;
@@ -4001,10 +3943,17 @@ main(int argc, char *argv[])
 	setup_paths();
 
 	/* Initial state read */
-	sync_state_from_best_source();
-	if (setup_runtime_subscription()) {
-		handle_runtime_subscription();
+	if (!sync_runtime_state()) {
+		fprintf(stderr,
+			"nscde_paneld: unable to query one or more runtime topics at startup\n");
+		return 1;
 	}
+	if (!setup_runtime_subscription()) {
+		fprintf(stderr,
+			"nscde_paneld: unable to subscribe to runtime topics at startup\n");
+		return 1;
+	}
+	handle_runtime_subscription();
 
 	/* Connect to Wayland */
 	panel.display = wl_display_connect(NULL);
@@ -4071,8 +4020,7 @@ main(int argc, char *argv[])
 	/* Set up poll fds */
 	pollfds[FD_WAYLAND].fd = wl_display_get_fd(panel.display);
 	pollfds[FD_WAYLAND].events = POLLIN;
-	setup_inotify();
-	setup_watchdog_timer();
+	setup_applet_timer();
 	setup_signals();
 
 	/* Initial render */
@@ -4109,12 +4057,10 @@ main(int argc, char *argv[])
 			(pollfds[FD_RUNTIME].revents &
 			(POLLIN | POLLERR | POLLHUP | POLLNVAL))) {
 			handle_runtime_subscription();
-		}
-
-		if (pollfds[FD_INOTIFY].revents & POLLIN) {
-			drain_inotify();
 			if (!panel.runtime_active) {
-				parse_all_state_files();
+				fprintf(stderr,
+					"nscde_paneld: runtime subscription disconnected\n");
+				break;
 			}
 		}
 
@@ -4123,9 +4069,6 @@ main(int argc, char *argv[])
 			ssize_t n = read(pollfds[FD_TIMER].fd, &exp, sizeof(exp));
 			(void)n;
 			refresh_applet_state();
-			if (!panel.runtime_active) {
-				refresh_state_transport();
-			}
 		}
 
 		if (pollfds[FD_SIGNAL].revents & POLLIN) {
@@ -4165,9 +4108,6 @@ main(int argc, char *argv[])
 
 	if (pollfds[FD_TIMER].fd >= 0) {
 		close(pollfds[FD_TIMER].fd);
-	}
-	if (pollfds[FD_INOTIFY].fd >= 0) {
-		close(pollfds[FD_INOTIFY].fd);
 	}
 	if (pollfds[FD_SIGNAL].fd >= 0) {
 		close(pollfds[FD_SIGNAL].fd);

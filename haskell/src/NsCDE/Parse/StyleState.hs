@@ -5,13 +5,15 @@ module NsCDE.Parse.StyleState
 import Data.Char (toLower)
 
 import NsCDE.Domain.Style
-  ( FocusPolicy(..)
+  ( DeskBackdrop(..)
+  , FocusPolicy(..)
   , IconFill(..)
   , IconPlacement(..)
   , IconSize(..)
   , StyleState(..)
   , defaultStyleState
   )
+import NsCDE.Domain.Backdrop (parseBackdropMode)
 import NsCDE.Foundation.Common (splitCommaList, trim)
 import NsCDE.Foundation.EnvFile (KeyValue)
 import NsCDE.Foundation.Settings (lookupText)
@@ -89,10 +91,7 @@ parseStyleStateEntries entries =
         lookupText entries "NSCDE_FONT_VARIABLE_NORMAL_MEDIUM" ""
     , styleFontMonospacedNormalMedium =
         lookupText entries "NSCDE_FONT_MONOSPACED_NORMAL_MEDIUM" ""
-    , styleBackdropDesk1Mode =
-        lookupText entries "NSCDE_BACKDROP_DESK_1_MODE" ""
-    , styleBackdropDesk1Image =
-        lookupText entries "NSCDE_BACKDROP_DESK_1_IMAGE" ""
+    , styleDeskBackdrops = parseDeskBackdrops entries
     }
 
 parseFocusPolicy :: String -> FocusPolicy
@@ -148,3 +147,19 @@ parseInteger rawValue =
   case reads (trim rawValue) of
     [(parsedValue, "")] -> Just parsedValue
     _ -> Nothing
+
+parseDeskBackdrops :: [KeyValue] -> [DeskBackdrop]
+parseDeskBackdrops entries =
+  foldr collect [] [1 .. 32]
+  where
+    collect deskNumber acc =
+      let modeText = lookupText entries ("NSCDE_BACKDROP_DESK_" ++ show deskNumber ++ "_MODE") ""
+          imageText = lookupText entries ("NSCDE_BACKDROP_DESK_" ++ show deskNumber ++ "_IMAGE") ""
+      in if null modeText && null imageText
+           then acc
+           else
+             DeskBackdrop
+               { deskBackdropDesk = deskNumber
+               , deskBackdropMode = parseBackdropMode modeText
+               , deskBackdropImage = imageText
+               } : acc

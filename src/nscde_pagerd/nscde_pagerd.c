@@ -13,6 +13,7 @@
  * Licence: GPLv3
  */
 
+#define _GNU_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
@@ -26,6 +27,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <wayland-client.h>
+
+#include "../nscde_wayland_common/runtime-client.h"
 
 /* Forward declarations for protocol-generated types */
 struct ext_workspace_manager_v1;
@@ -58,11 +61,8 @@ static struct {
 	int workspace_count;
 	char current_workspace[MAX_NAME_LEN];
 
-	/* State files */
 	char state_dir[PATH_MAX_LEN];
-	char pager_env_path[PATH_MAX_LEN];
 	char pager_fifo_path[PATH_MAX_LEN];
-	char workspaces_env_path[PATH_MAX_LEN];
 
 	/* Session FIFO for receiving commands */
 	int session_fifo_fd;
@@ -140,37 +140,26 @@ remove_workspace(struct ext_workspace_handle_v1 *handle)
 	}
 }
 
-/* Write pager.env state file */
 static void
-write_pager_env(void)
+write_workspace_names(FILE *stream, const char *key)
 {
-	FILE *f;
-	char tmp_path[PATH_MAX_LEN + 4];
-
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", pager.pager_env_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
-		fprintf(stderr, "nscde_pagerd: cannot write %s: %s\n",
-		    tmp_path, strerror(errno));
-		return;
-	}
-
-	fprintf(f, "NSCDE_PAGER_WORKSPACES=");
+	fprintf(stream, "%s=", key);
 	for (int i = 0; i < pager.workspace_count; i++) {
 		if (pager.workspaces[i].valid) {
 			if (i > 0) {
-				fprintf(f, ",");
+				fprintf(stream, ",");
 			}
-			fprintf(f, "%s", pager.workspaces[i].name);
+			fprintf(stream, "%s", pager.workspaces[i].name);
 		}
 	}
-	fprintf(f, "\n");
+	fprintf(stream, "\n");
+}
 
-	fprintf(f, "NSCDE_PAGER_CURRENT=%s\n", pager.current_workspace);
-	fprintf(f, "NSCDE_PAGER_COUNT=%d\n", pager.workspace_count);
-
-	/* Find index of current workspace */
+static int
+current_workspace_index(void)
+{
 	int current_index = 0;
+
 	for (int i = 0; i < pager.workspace_count; i++) {
 		if (pager.workspaces[i].valid &&
 		    strcmp(pager.workspaces[i].name, pager.current_workspace) == 0) {
@@ -178,63 +167,68 @@ write_pager_env(void)
 			break;
 		}
 	}
-	fprintf(f, "NSCDE_PAGER_INDEX=%d\n", current_index);
-	fprintf(f, "NSCDE_PAGER_COMMAND_FIFO=%s\n", pager.pager_fifo_path);
-
-	fclose(f);
-
-	/* Atomic rename */
-	if (rename(tmp_path, pager.pager_env_path) != 0) {
-		fprintf(stderr, "nscde_pagerd: cannot rename %s: %s\n",
-		    tmp_path, strerror(errno));
-	}
+	return current_index;
 }
 
-/* Write workspaces.env state file */
 static void
-write_workspaces_env(void)
+write_pager_state(FILE *stream)
 {
-	FILE *f;
-	char tmp_path[PATH_MAX_LEN + 4];
-
-	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", pager.workspaces_env_path);
-	f = fopen(tmp_path, "w");
-	if (!f) {
-		fprintf(stderr, "nscde_pagerd: cannot write %s: %s\n",
-		    tmp_path, strerror(errno));
-		return;
-	}
-
-	fprintf(f, "NSCDE_WORKSPACES=");
-	for (int i = 0; i < pager.workspace_count; i++) {
-		if (pager.workspaces[i].valid) {
-			if (i > 0) {
-				fprintf(f, ",");
-			}
-			fprintf(f, "%s", pager.workspaces[i].name);
-		}
-	}
-	fprintf(f, "\n");
-
-	fprintf(f, "NSCDE_WORKSPACE_COUNT=%d\n", pager.workspace_count);
-	fprintf(f, "NSCDE_CURRENT_WORKSPACE=%s\n", pager.current_workspace);
-	fprintf(f, "NSCDE_PAGER_COMMAND_FIFO=%s\n", pager.pager_fifo_path);
-
-	fclose(f);
-
-	/* Atomic rename */
-	if (rename(tmp_path, pager.workspaces_env_path) != 0) {
-		fprintf(stderr, "nscde_pagerd: cannot rename %s: %s\n",
-		    tmp_path, strerror(errno));
-	}
+	write_workspace_names(stream, "NSCDE_PAGER_WORKSPACES");
+	fprintf(stream, "NSCDE_PAGER_CURRENT=%s\n", pager.current_workspace);
+	fprintf(stream, "NSCDE_PAGER_COUNT=%d\n", pager.workspace_count);
+	fprintf(stream, "NSCDE_PAGER_INDEX=%d\n", current_workspace_index());
+	fprintf(stream, "NSCDE_PAGER_COMMAND_FIFO=%s\n", pager.pager_fifo_path);
 }
 
-/* Update all state files */
+static void
+write_workspaces_state(FILE *stream)
+{
+	write_workspace_names(stream, "NSCDE_WORKSPACES");
+	fprintf(stream, "NSCDE_WORKSPACE_COUNT=%d\n", pager.workspace_count);
+	fprintf(stream, "NSCDE_CURRENT_WORKSPACE=%s\n", pager.current_workspace);
+	fprintf(stream, "NSCDE_PAGER_COMMAND_FIFO=%s\n", pager.pager_fifo_path);
+}
+
+typedef void (*state_writer_fn)(FILE *stream);
+
+static bool
+publish_runtime_topic(const char *topic, state_writer_fn writer)
+{
+	FILE *stream;
+	char *contents = NULL;
+	size_t contents_size = 0;
+	bool success;
+
+	if (!topic || !writer) {
+		return false;
+	}
+
+	stream = open_memstream(&contents, &contents_size);
+	if (!stream) {
+		fprintf(stderr,
+		    "nscde_pagerd: cannot allocate publish buffer for %s: %s\n",
+		    topic, strerror(errno));
+		return false;
+	}
+
+	writer(stream);
+	fclose(stream);
+
+	success = nscde_runtime_publish_topic(topic, contents ? contents : "");
+	if (!success) {
+		fprintf(stderr,
+		    "nscde_pagerd: failed to publish runtime %s state\n",
+		    topic);
+	}
+	free(contents);
+	return success;
+}
+
 static void
 update_state(void)
 {
-	write_pager_env();
-	write_workspaces_env();
+	publish_runtime_topic("workspaces", write_workspaces_state);
+	publish_runtime_topic("pager", write_pager_state);
 	pager.dirty = false;
 }
 
@@ -459,27 +453,30 @@ process_fifo_commands(void)
 static void
 init_paths(void)
 {
+	const char *state_dir = getenv("NSCDE_STATE_DIR");
 	const char *xdg_cache = getenv("XDG_CACHE_HOME");
 	char cache_dir[512];
 
-	if (xdg_cache) {
+	if (state_dir && state_dir[0]) {
+		snprintf(pager.state_dir, sizeof(pager.state_dir), "%s",
+		    state_dir);
+		pager.state_dir[sizeof(pager.state_dir) - 1] = '\0';
+	} else if (xdg_cache) {
 		snprintf(cache_dir, sizeof(cache_dir), "%s", xdg_cache);
+		snprintf(pager.state_dir, sizeof(pager.state_dir),
+		    "%s/nscde-stage1", cache_dir);
 	} else {
 		const char *home = getenv("HOME");
 		if (!home) {
 			home = "/tmp";
 		}
 		snprintf(cache_dir, sizeof(cache_dir), "%s/.cache", home);
+		snprintf(pager.state_dir, sizeof(pager.state_dir),
+		    "%s/nscde-stage1", cache_dir);
 	}
 
-	snprintf(pager.state_dir, sizeof(pager.state_dir),
-	    "%s/nscde-stage1", cache_dir);
-	snprintf(pager.pager_env_path, sizeof(pager.pager_env_path),
-	    "%s/pager.env", pager.state_dir);
 	snprintf(pager.pager_fifo_path, sizeof(pager.pager_fifo_path),
 	    "%s/pagerd.fifo", pager.state_dir);
-	snprintf(pager.workspaces_env_path, sizeof(pager.workspaces_env_path),
-	    "%s/workspaces.env", pager.state_dir);
 }
 
 /* Ensure state directory exists */
@@ -700,8 +697,8 @@ main(int argc, char *argv[])
 			break;
 		}
 
-		/* Poll for events */
-		int ret = poll(fds, nfds, 1000);
+		/* Poll until the Wayland socket or command FIFO becomes readable. */
+		int ret = poll(fds, nfds, -1);
 		if (ret < 0) {
 			if (errno == EINTR) {
 				if (caught_signal) {
@@ -718,15 +715,6 @@ main(int argc, char *argv[])
 			break;
 		}
 
-		if (ret == 0) {
-			/* Timeout - check for state updates */
-			wl_display_cancel_read(pager.display);
-			if (pager.dirty) {
-				update_state();
-			}
-			continue;
-		}
-
 		/* Handle Wayland events */
 		if (fds[0].revents & POLLIN) {
 			if (wl_display_read_events(pager.display) < 0) {
@@ -738,6 +726,9 @@ main(int argc, char *argv[])
 				fprintf(stderr, "nscde_pagerd: dispatch failed\n");
 				pager.running = false;
 				break;
+			}
+			if (pager.dirty) {
+				update_state();
 			}
 		} else {
 			wl_display_cancel_read(pager.display);

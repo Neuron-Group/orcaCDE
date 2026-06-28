@@ -1,22 +1,32 @@
 module Main (main) where
 
+import System.Directory (createDirectoryIfMissing)
+import System.FilePath ((</>))
+
 import Test.HUnit
 
 import NsCDE.Backend.Labwc.KeybindXml (renderKeyboardXml)
 import NsCDE.Backend.Labwc.MenuXml (renderMenuXml)
 import NsCDE.Backend.Labwc.RcXml (renderRcXml)
 import NsCDE.Backend.Labwc.Theme (renderLabwcThemeFiles)
+import NsCDE.Domain.Backdrop
+  ( BackdropMode(..)
+  , BackdropPlan(..)
+  )
 import NsCDE.Domain.Keybinds
+import NsCDE.Domain.Keymap (KeymapEnvironment(..))
 import NsCDE.Domain.Menu
 import NsCDE.Domain.Palette (PaletteColor, parseHexColor8)
 import NsCDE.Domain.PanelLayout
 import NsCDE.Domain.Session (RcFont(..), RcInput(..))
 import NsCDE.Domain.Style
-  ( FocusPolicy(..)
+  ( DeskBackdrop(..)
+  , FocusPolicy(..)
   , IconFill(..)
   , IconPlacement(..)
   , IconSize(..)
   , defaultStyleState
+  , lookupDeskBackdrop
   , styleAutoRaise
   , styleEdgeMoveDelayMs
   , styleEdgeMoveResistancePx
@@ -33,10 +43,12 @@ import NsCDE.Domain.Style
   )
 import NsCDE.Foundation.EnvFile (renderEnvFile)
 import NsCDE.Parse.AppMenus (parseAppMenuContents)
-import NsCDE.Parse.Keybindings (parseKeybindingsContents)
+import NsCDE.Parse.Keybindings (ParsedKeybinding(..), parseKeybindingsContents)
 import NsCDE.Parse.StyleMgrIni (lookupIniValueInContents)
 import NsCDE.Parse.StyleState (parseStyleStateEntries)
-import NsCDE.Policy.Backdrop (backdropCandidatePaths)
+import NsCDE.Policy.Backdrop (backdropCandidatePaths, currentBackdropDesk)
+import NsCDE.Policy.Backdrop (buildBackdropPlan)
+import NsCDE.Policy.Keymap (buildBindingIntent, renderBindingIntent)
 import NsCDE.Policy.Menu (buildMenuModel)
 import NsCDE.Policy.PanelLayout (emitPanelLayout)
 import NsCDE.Policy.SessionPlan (buildRcConfig)
@@ -62,6 +74,10 @@ tests =
     , TestLabel "style state parsing" testStyleStateParsing
     , TestLabel "theme rendering" testThemeRendering
     , TestLabel "backdrop candidates" testBackdropCandidates
+    , TestLabel "backdrop desk fallback" testBackdropDeskFallback
+    , TestLabel "default backdrop plan" testDefaultBackdropPlan
+    , TestLabel "keymap translation" testKeymapTranslation
+    , TestLabel "keymap mixed context rejected" testKeymapMixedContextRejected
     ]
 
 testAppMenuParsing :: Test
@@ -198,6 +214,10 @@ testStyleStateParsing =
             , ("NSCDE_EDGE_RESISTANCE", "500")
             , ("NSCDE_EDGE_MOVE_RESISTANCE", "25")
             , ("NSCDE_EDGE_MOVE_DELAY", "400")
+            , ("NSCDE_BACKDROP_DESK_1_MODE", "tiled")
+            , ("NSCDE_BACKDROP_DESK_1_IMAGE", "DeskOne")
+            , ("NSCDE_BACKDROP_DESK_2_MODE", "photo")
+            , ("NSCDE_BACKDROP_DESK_2_IMAGE", "DeskTwo")
             ]
         parsedIconSize = styleIconSize styleState
     assertEqual "focus policy parsed" SloppyFocus (styleFocusPolicy styleState)
@@ -214,6 +234,18 @@ testStyleStateParsing =
     assertEqual "edge resistance parsed" 500 (styleEdgeResistancePx styleState)
     assertEqual "edge move resistance parsed" 25 (styleEdgeMoveResistancePx styleState)
     assertEqual "edge move delay parsed" 400 (styleEdgeMoveDelayMs styleState)
+    case lookupDeskBackdrop 1 styleState of
+      Just deskBackdrop -> do
+        assertEqual "desk one backdrop mode parsed" (Just BackdropModeTiled) (deskBackdropMode deskBackdrop)
+        assertEqual "desk one backdrop image parsed" "DeskOne" (deskBackdropImage deskBackdrop)
+      Nothing ->
+        assertFailure "expected desk one backdrop"
+    case lookupDeskBackdrop 2 styleState of
+      Just deskBackdrop -> do
+        assertEqual "desk two backdrop mode parsed" (Just BackdropModePhoto) (deskBackdropMode deskBackdrop)
+        assertEqual "desk two backdrop image parsed" "DeskTwo" (deskBackdropImage deskBackdrop)
+      Nothing ->
+        assertFailure "expected desk two backdrop"
 
 testThemeRendering :: Test
 testThemeRendering =
@@ -253,7 +285,86 @@ testBackdropCandidates =
       , "/tmp/home/.NsCDE/backdrops/Example.pm"
       , "/tmp/assets/backdrops/Example.pm"
       ]
-      (backdropCandidatePaths "/tmp/home/.NsCDE" "/tmp/assets" "tiled" "Example")
+      (backdropCandidatePaths "/tmp/home/.NsCDE" "/tmp/assets" 1 (Just BackdropModeTiled) "Example")
+
+testBackdropDeskFallback :: Test
+testBackdropDeskFallback =
+  TestCase $ do
+    assertEqual "workspace maps to desk index" 2 (currentBackdropDesk ["Alpha", "Beta"] "Beta")
+    assertEqual "missing workspace falls back to desk one" 1 (currentBackdropDesk ["Alpha", "Beta"] "Missing")
+
+testDefaultBackdropPlan :: Test
+testDefaultBackdropPlan =
+  TestCase $ do
+    let assetRoot = "/tmp/nscde-wayland-runtime-tests/assets"
+        backdropDir = assetRoot </> "backdrops"
+        backdropPath = backdropDir </> "Convex.pm"
+    createDirectoryIfMissing True backdropDir
+    writeFile backdropPath "/* runtime test backdrop */\n"
+    backdropPlan <-
+      buildBackdropPlan
+        "/tmp/home/.NsCDE"
+        assetRoot
+        ["One", "Two", "Three", "Four"]
+        "Three"
+        defaultStyleState
+        [("NSCDE_PALETTE_1", "#123456")]
+    assertEqual "default desk uses workspace index" 3 (backdropPlanDesk backdropPlan)
+    assertEqual "default backdrop image name" "Convex" (backdropPlanImage backdropPlan)
+    assertEqual "default backdrop mode" (Just BackdropModeTiled) (backdropPlanMode backdropPlan)
+    assertEqual "default backdrop path"
+      (Just backdropPath)
+      (backdropPlanSourcePath backdropPlan)
+
+testKeymapTranslation :: Test
+testKeymapTranslation =
+  TestCase $ do
+    let keymapEnv =
+          KeymapEnvironment
+            { keymapTerminal = "xterm"
+            , keymapToolsDir = "/tools"
+            , keymapDataDir = "/data"
+            }
+        parsedBinding =
+          ParsedKeybinding
+            { parsedKeyName = "Page_Up"
+            , parsedContext = "R"
+            , parsedModifier = "C"
+            , parsedAction = "Scroll 0 100000"
+            }
+    case buildBindingIntent keymapEnv parsedBinding of
+      Just bindingIntent -> do
+        let binding = renderBindingIntent bindingIntent
+        assertEqual "mapped key keeps modifiers" "C-Prior" (keybindKey binding)
+        assertEqual "mapped action count" 1 (length (keybindActions binding))
+        case keybindActions binding of
+          action:_ -> do
+            assertEqual "mapped action name" "GoToDesktop" (keybindActionName action)
+            assertEqual "mapped action attrs" [("to", "right"), ("wrap", "yes")] (keybindActionAttrs action)
+          [] ->
+            assertFailure "expected translated action"
+      Nothing ->
+        assertFailure "expected translated key binding"
+
+testKeymapMixedContextRejected :: Test
+testKeymapMixedContextRejected =
+  TestCase $ do
+    let keymapEnv =
+          KeymapEnvironment
+            { keymapTerminal = "xterm"
+            , keymapToolsDir = "/tools"
+            , keymapDataDir = "/data"
+            }
+        parsedBinding =
+          ParsedKeybinding
+            { parsedKeyName = "Right"
+            , parsedContext = "RWFST"
+            , parsedModifier = "CM"
+            , parsedAction = "Next ($[w.accepts_focus], Iconic off, CurrentPage, CurrentDesk) FlipFocus"
+            }
+    assertEqual "mixed FVWM contexts are not accepted as labwc keybind contexts"
+      Nothing
+      (buildBindingIntent keymapEnv parsedBinding)
 
 samplePanelProfile :: StaticPanelProfile
 samplePanelProfile =

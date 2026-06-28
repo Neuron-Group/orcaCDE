@@ -22,9 +22,12 @@ CONFIG_DIR="$WORK_DIR/labwc"
 STATE_DIR="$WORK_DIR/state"
 THEME_DIR="$WORK_DIR/home/.local/share/themes/NsCDE-Stage1/labwc"
 KEYBIND_FILE="$STATE_DIR/labwc-keybinds.xml"
+KEYBIND_SHIM_FILE="$WORK_DIR/labwc-keybinds-shim.xml"
 STYLE_FILE="$STATE_DIR/style.env"
 DAEMON_LOG="$WORK_DIR/runtime-daemon.log"
 DAEMON_PID=""
+BACKDROPD_LOG="$WORK_DIR/backdropd.log"
+BACKDROPD_PID=""
 FVWM_USERDIR="$WORK_DIR/home/.NsCDE"
 GTK3_SETTINGS_DIR="$WORK_DIR/home/.config/gtk-3.0"
 GTK3_SETTINGS_FILE="$GTK3_SETTINGS_DIR/settings.ini"
@@ -39,35 +42,114 @@ FONT_MONOSPACED_NORMAL_MEDIUM='xft:DejaVu Sans Mono:Medium:Book:size=12'
 BACKER_DIR="$FVWM_USERDIR/backer"
 BACKDROP_NAME="RuntimeCheckBackdrop"
 BACKDROP_FILE="$BACKER_DIR/Desk1-$BACKDROP_NAME.pm"
-BG_HELPER_ENV="$STATE_DIR/bg-helper.env"
+DEFAULT_BACKDROP_FILE="$ROOT_DIR/assets/backdrops/Ankh.pm"
+BACKDROP_STATE_FILE="$STATE_DIR/backdrops.env"
+BOGUS_BACKDROP_FILE="$WORK_DIR/bogus-backdrop.pm"
+SWAYBG_LOG="$WORK_DIR/swaybg.log"
+FAKE_SWAYBG="$WORK_DIR/fake-swaybg"
+NO_RUNTIME_DIR="$WORK_DIR/no-runtime"
+
+normalize_keybind_xml() {
+   awk '
+      function trim(value) {
+         sub(/^[[:space:]]+/, "", value)
+         sub(/[[:space:]]+$/, "", value)
+         return value
+      }
+
+      BEGIN {
+         in_keybind = 0
+         body = ""
+      }
+
+      /<keybind key="/ {
+         in_keybind = 1
+         body = ""
+         if (match($0, /key="[^"]+"/)) {
+            key = substr($0, RSTART + 5, RLENGTH - 6)
+         } else {
+            key = ""
+         }
+         next
+      }
+
+      /<\/keybind>/ {
+         if (in_keybind) {
+            gsub(/&quot;/, "\"", body)
+            gsub(/[[:space:]]+/, " ", body)
+            body = trim(body)
+            print key "\t" body
+         }
+         in_keybind = 0
+         body = ""
+         next
+      }
+
+      {
+         if (in_keybind) {
+            line = trim($0)
+            if (line != "") {
+               body = body " " line
+            }
+         }
+      }
+   ' "$1" | sort
+}
+
+assert_keybind_parity() {
+   SHIM_NORM_FILE="$WORK_DIR/labwc-keybinds-shim.norm"
+   RUNTIME_NORM_FILE="$WORK_DIR/labwc-keybinds-runtime.norm"
+
+   normalize_keybind_xml "$KEYBIND_SHIM_FILE" > "$SHIM_NORM_FILE"
+   normalize_keybind_xml "$KEYBIND_FILE" > "$RUNTIME_NORM_FILE"
+
+   if ! diff -u "$SHIM_NORM_FILE" "$RUNTIME_NORM_FILE" >/dev/null; then
+      echo "runtime-check: runtime keybind publisher diverged from compatibility shim semantics" >&2
+      diff -u "$SHIM_NORM_FILE" "$RUNTIME_NORM_FILE" >&2 || true
+      exit 1
+   fi
+}
 
 cleanup() {
-   if [ -n "$DAEMON_PID" ]; then
-      kill "$DAEMON_PID" 2>/dev/null || true
-      wait "$DAEMON_PID" 2>/dev/null || true
-   fi
+   terminate_pid "$BACKDROPD_PID"
+   terminate_pid "$DAEMON_PID"
    rm -rf "$WORK_DIR"
 }
 
 trap cleanup EXIT HUP INT TERM
 
-CHECK_TOOLS_DIR="$WORK_DIR/tools"
-mkdir -p "$CHECK_TOOLS_DIR"
+terminate_pid() {
+   _pid=${1:-}
+   _attempt=0
+
+   if [ -z "$_pid" ]; then
+      return 0
+   fi
+   if ! kill -0 "$_pid" 2>/dev/null; then
+      wait "$_pid" 2>/dev/null || true
+      return 0
+   fi
+
+   kill "$_pid" 2>/dev/null || true
+   while kill -0 "$_pid" 2>/dev/null; do
+      _attempt=$((_attempt + 1))
+      if [ "$_attempt" -ge 50 ]; then
+         kill -KILL "$_pid" 2>/dev/null || true
+         break
+      fi
+      sleep 0.1
+   done
+   wait "$_pid" 2>/dev/null || true
+}
+
 mkdir -p "$STATE_DIR"
-for tool_path in "$TOOLS_DIR"/*; do
-   ln -s "$tool_path" "$CHECK_TOOLS_DIR/$(basename "$tool_path")"
-done
-rm -f "$CHECK_TOOLS_DIR/nscde_labwc_bg"
-cat > "$CHECK_TOOLS_DIR/nscde_labwc_bg" <<EOF
+mkdir -p "$NO_RUNTIME_DIR"
+cat > "$FAKE_SWAYBG" <<'EOF'
 #!/bin/sh
-cat > "$BG_HELPER_ENV" <<BGEOF
-NSCDE_PALETTE_FILE=\${NSCDE_PALETTE_FILE:-}
-NSCDE_BACKDROP_IMAGE=\${NSCDE_BACKDROP_IMAGE:-}
-NSCDE_BACKDROP_MODE=\${NSCDE_BACKDROP_MODE:-}
-BGEOF
+printf '%s\n' "$*" >> "${SWAYBG_LOG:?}"
+exec sleep 60
 EOF
-chmod +x "$CHECK_TOOLS_DIR/nscde_labwc_bg"
-TOOLS_DIR="$CHECK_TOOLS_DIR"
+chmod +x "$FAKE_SWAYBG"
 
 "$RUNTIME_BIN" panel-layout publish "$NSCDE_STATIC_PANEL_LAYOUT_FILE" > "$PANEL_LAYOUT_FILE"
 
@@ -87,6 +169,16 @@ NSCDE_TOOLSDIR="$TOOLS_DIR" \
 NSCDE_LABWC_TERMINAL="xterm" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" labwc-keybinds publish > "$KEYBIND_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_DATADIR="$ROOT_DIR/assets" \
+FVWM_USERDIR="$FVWM_USERDIR" \
+NSCDE_TOOLSDIR="$TOOLS_DIR" \
+NSCDE_LABWC_TERMINAL="xterm" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+ksh "$ROOT_DIR/tools/nscde_labwc_keybindgen_legacy.ksh" > "$KEYBIND_SHIM_FILE"
+
+assert_keybind_parity
 
 HOME="$WORK_DIR/home" \
 NSCDE_DATADIR="$ROOT_DIR/assets" \
@@ -179,9 +271,26 @@ while [ ! -S "$SOCKET_FILE" ]; do
    sleep 0.1
 done
 
+HOME="$WORK_DIR/home" \
+NSCDE_TOOLSDIR="$TOOLS_DIR" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+XDG_RUNTIME_DIR="$NO_RUNTIME_DIR" \
+WAYLAND_DISPLAY="missing-wayland-display" \
+SWAYBG_BIN="$FAKE_SWAYBG" \
+SWAYBG_LOG="$SWAYBG_LOG" \
+"$TOOLS_DIR/nscde_backdropd" >"$BACKDROPD_LOG" 2>&1 &
+BACKDROPD_PID=$!
+
 QUERY_FILE="$WORK_DIR/query-workspaces.env"
 PANEL_QUERY_FILE="$WORK_DIR/query-panel.env"
 PANEL_STYLE_APPLY_FILE="$WORK_DIR/query-panel-after-style-apply.env"
+BACKDROP_QUERY_FILE="$WORK_DIR/query-backdrops.env"
+SESSION_QUERY_FILE="$WORK_DIR/query-session.env"
+STYLE_QUERY_FILE="$WORK_DIR/query-style.env"
+PY_STYLE_QUERY_FILE="$WORK_DIR/python-query-style.txt"
+CAPS_FILE="$WORK_DIR/query-capabilities.env"
+TASKD_QUERY_FILE="$WORK_DIR/query-taskd.env"
+SUBSCRIBE_FILE="$WORK_DIR/subscribe-workspaces.env"
 
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
@@ -191,9 +300,69 @@ HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" query panel > "$PANEL_QUERY_FILE"
 
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query backdrops > "$BACKDROP_QUERY_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query taskd > "$TASKD_QUERY_FILE"
+
+STYLE_FILE_SAVED="$WORK_DIR/style.saved.env"
+mv "$STYLE_FILE" "$STYLE_FILE_SAVED"
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+python - <<'EOF' > "$PY_STYLE_QUERY_FILE"
+path = "legacy-shims/nscde_runtime_client.py.in"
+ns = {"__name__": "runtime_client_test", "__file__": path}
+with open(path, "r", encoding="utf-8") as handle:
+   code = compile(handle.read(), path, "exec")
+exec(code, ns)
+print(ns["style_state"]())
+EOF
+mv "$STYLE_FILE_SAVED" "$STYLE_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" subscribe workspaces > "$SUBSCRIBE_FILE" &
+SUBSCRIBE_PID=$!
+
+attempt=0
+while ! grep -q '^NSCDE_CURRENT_WORKSPACE=Alpha$' "$SUBSCRIBE_FILE" 2>/dev/null; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: subscribe did not emit initial workspace state" >&2
+      cat "$DAEMON_LOG" >&2 || true
+      kill "$SUBSCRIBE_PID" 2>/dev/null || true
+      wait "$SUBSCRIBE_PID" 2>/dev/null || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
+kill "$SUBSCRIBE_PID" 2>/dev/null || true
+wait "$SUBSCRIBE_PID" 2>/dev/null || true
+
 grep -q '^NSCDE_CURRENT_WORKSPACE=Alpha$' "$QUERY_FILE"
 grep -q '^NSCDE_WORKSPACE_COUNT=2$' "$QUERY_FILE"
 grep -q '^NSCDE_PALETTE_1=#' "$PANEL_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_WORKSPACE=Alpha$' "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_DESK=1$' "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_IMAGE_NAME=Ankh$' "$BACKDROP_QUERY_FILE"
+grep -q "^NSCDE_BACKDROP_IMAGE=$DEFAULT_BACKDROP_FILE\$" "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_MODE=tiled$' "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_TASK_COUNT=0$' "$TASKD_QUERY_FILE"
+grep -q '^NSCDE_TASK_FOCUSED=$' "$TASKD_QUERY_FILE"
+grep -q '^NSCDE_TASK_COMMAND_FIFO='"$STATE_DIR"'/topleveld.fifo$' "$TASKD_QUERY_FILE"
+grep -q '^{}$' "$PY_STYLE_QUERY_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$TOOLS_DIR/nscde_labwc_taskd"
+
+grep -q '^NSCDE_TASK_COUNT=0$' "$STATE_DIR/taskd.env"
+grep -q '^NSCDE_TASK_FOCUSED=$' "$STATE_DIR/taskd.env"
+grep -q '^NSCDE_TASK_COMMAND_FIFO='"$STATE_DIR"'/topleveld.fifo$' "$STATE_DIR/taskd.env"
 
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
@@ -204,9 +373,6 @@ NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" query workspaces > "$QUERY_FILE"
 
 grep -q '^NSCDE_CURRENT_WORKSPACE=Beta$' "$QUERY_FILE"
-
-CAPS_FILE="$WORK_DIR/query-capabilities.env"
-STYLE_QUERY_FILE="$WORK_DIR/query-style.env"
 
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
@@ -253,13 +419,11 @@ NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" ctl style-apply
 
 attempt=0
-while [ ! -s "$BG_HELPER_ENV" ]; do
+while ! grep -F -q -- "-i $BACKDROP_FILE" "$SWAYBG_LOG" 2>/dev/null; do
    attempt=$((attempt + 1))
    if [ "$attempt" -ge 50 ]; then
-      echo "runtime-check: bg helper env not ready" >&2
-      if [ -e "$BG_HELPER_ENV" ]; then
-         cat "$BG_HELPER_ENV" >&2 || true
-      fi
+      echo "runtime-check: backdrop daemon did not launch swaybg" >&2
+      cat "$BACKDROPD_LOG" >&2 || true
       cat "$DAEMON_LOG" >&2 || true
       exit 1
    fi
@@ -269,6 +433,64 @@ done
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" query style > "$STYLE_QUERY_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query backdrops > "$BACKDROP_QUERY_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query session > "$SESSION_QUERY_FILE"
+
+printf '%s\n' 'runtime-check-bogus-backdrop' > "$BOGUS_BACKDROP_FILE"
+cat > "$BACKDROP_STATE_FILE" <<EOF
+NSCDE_BACKDROP_WORKSPACE=Hacked
+NSCDE_BACKDROP_DESK=99
+NSCDE_BACKDROP_MODE=photo
+NSCDE_BACKDROP_IMAGE_NAME=Bogus
+NSCDE_BACKDROP_IMAGE=$BOGUS_BACKDROP_FILE
+NSCDE_BACKDROP_COLOR=#123456
+NSCDE_BACKDROP_OUTPUT_COUNT=1
+NSCDE_BACKDROP_OUTPUT_default_IMAGE=$BOGUS_BACKDROP_FILE
+NSCDE_BACKDROP_OUTPUT_default_MODE=photo
+NSCDE_BACKDROP_OUTPUT_default_COLOR=#123456
+EOF
+
+sleep 2
+if grep -F -q -- "-i $BOGUS_BACKDROP_FILE" "$SWAYBG_LOG" 2>/dev/null; then
+   echo "runtime-check: backdrop daemon consumed compatibility backdrops.env as live input" >&2
+   cat "$BACKDROPD_LOG" >&2 || true
+   cat "$SWAYBG_LOG" >&2 || true
+   exit 1
+fi
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl workspace-switch Alpha
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl workspace-switch Beta
+
+attempt=0
+while ! grep -q "^NSCDE_BACKDROP_IMAGE=$BACKDROP_FILE\$" "$BACKDROP_STATE_FILE" 2>/dev/null; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: runtime-owned backdrop mirror was not restored after workspace refresh" >&2
+      cat "$BACKDROP_STATE_FILE" >&2 || true
+      cat "$BACKDROPD_LOG" >&2 || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query backdrops > "$BACKDROP_QUERY_FILE"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" query session > "$SESSION_QUERY_FILE"
 
 grep -v '^NSCDE_FP_VARIANT=' "$STYLE_FILE" | \
 grep -v '^NSCDE_PALETTE_PATH=' > "$STYLE_FILE.tmp"
@@ -308,6 +530,22 @@ grep -q '^NSCDE_FOCUS_POLICY=SloppyFocus$' "$STYLE_QUERY_FILE"
 grep -q '^NSCDE_AUTO_RAISE=1$' "$STYLE_QUERY_FILE"
 grep -q '^NSCDE_RAISE_DELAY=250$' "$STYLE_QUERY_FILE"
 grep -q "^NSCDE_FONTSET_NAME=$FONTSET_NAME\$" "$STYLE_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_WORKSPACE=Beta$' "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_DESK=2$' "$BACKDROP_QUERY_FILE"
+grep -q "^NSCDE_BACKDROP_IMAGE_NAME=$BACKDROP_NAME\$" "$BACKDROP_QUERY_FILE"
+grep -q "^NSCDE_BACKDROP_IMAGE=$BACKDROP_FILE\$" "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_MODE=tiled$' "$BACKDROP_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_COLOR=#' "$BACKDROP_QUERY_FILE"
+grep -q "^NSCDE_BACKDROP_IMAGE=$BACKDROP_FILE\$" "$SESSION_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_COLOR=#' "$SESSION_QUERY_FILE"
+grep -q '^NSCDE_BACKDROP_WORKSPACE=Beta$' "$BACKDROP_STATE_FILE"
+grep -q '^NSCDE_BACKDROP_DESK=2$' "$BACKDROP_STATE_FILE"
+grep -q "^NSCDE_BACKDROP_IMAGE_NAME=$BACKDROP_NAME\$" "$BACKDROP_STATE_FILE"
+grep -q '^NSCDE_BACKDROP_OUTPUT_COUNT=1$' "$BACKDROP_STATE_FILE"
+grep -q "^NSCDE_BACKDROP_OUTPUT_default_IMAGE=$BACKDROP_FILE\$" "$BACKDROP_STATE_FILE"
+grep -q '^NSCDE_BACKDROP_OUTPUT_default_MODE=tiled$' "$BACKDROP_STATE_FILE"
+grep -q '^NSCDE_BACKDROP_OUTPUT_default_COLOR=#' "$BACKDROP_STATE_FILE"
+grep -F -q -- "-m tile" "$SWAYBG_LOG"
 grep -q '^NSCDE_FP_VARIANT=8$' "$PANEL_STYLE_APPLY_FILE"
 grep -q '^NSCDE_PALETTE_1=#' "$PANEL_STYLE_APPLY_FILE"
 grep -Eq '^gtk-font-name *= *"?DejaVu Serif Book 11"?$' "$GTK3_SETTINGS_FILE"
@@ -316,11 +554,9 @@ grep -Eq '^fixed *= *"DejaVu Sans Mono,12"$' "$QT5CT_FILE"
 grep -Eq '^Gtk/FontName "DejaVu Serif Book 11"$' "$XSETTINGSD_FILE"
 grep -q 'FONT_VARIABLE_NORMAL_MEDIUM_NAME DejaVu Serif' "$XDEFAULTS_FONTDEFS"
 grep -q 'FONT_MONOSPACED_NORMAL_MEDIUM_NAME DejaVu Sans Mono' "$XDEFAULTS_FONTDEFS"
-grep -q "^NSCDE_PALETTE_FILE=$ROOT_DIR/assets/palettes/Charcoal.dp\$" "$BG_HELPER_ENV"
-grep -q "^NSCDE_BACKDROP_IMAGE=$BACKDROP_FILE\$" "$BG_HELPER_ENV"
-grep -q '^NSCDE_BACKDROP_MODE=tiled$' "$BG_HELPER_ENV"
 test -s "$STATE_DIR/session.env"
 test -s "$STATE_DIR/panel.env"
+test -s "$BACKDROP_STATE_FILE"
 test -s "$STATE_DIR/workspaces.env"
 test -s "$THEME_DIR/themerc"
 test -s "$THEME_DIR/menu-active.xpm"
@@ -330,5 +566,6 @@ grep -q '^window.active.title.bg.color: #' "$THEME_DIR/themerc"
 printf '%s\n' "runtime-check: ok"
 printf '%s\n' "panel-layout=$PANEL_LAYOUT_FILE"
 printf '%s\n' "keybinds=$KEYBIND_FILE"
+printf '%s\n' "keybinds-shim=$KEYBIND_SHIM_FILE"
 printf '%s\n' "config-dir=$CONFIG_DIR"
 printf '%s\n' "state-dir=$STATE_DIR"

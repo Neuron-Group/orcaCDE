@@ -107,6 +107,9 @@ Concrete seams removed so far:
   `legacy-shims/nscde_sessiond` remains only as a compatibility wrapper
 - the current runtime verification path now smoke-tests the daemon socket plus
   `ctl` / `query`, not just the render subcommands
+- `runtime-check` now also enforces runtime/shim keybind parity and verifies
+  that `backdrops.env` remains a compatibility mirror rather than a second live
+  backdrop policy input
 
 The standalone repo now carries `labwc/` as a git submodule and the flake
 builds the packaged launcher against that bundled patched compositor by
