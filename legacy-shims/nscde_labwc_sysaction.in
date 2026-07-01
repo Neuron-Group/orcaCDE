@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 import nscde_runtime_client as runtime_client
@@ -45,13 +46,6 @@ def nscde_toolsdir():
     if os.path.isdir(user_dir):
         return user_dir
     return "/usr/share/NsCDE/nscde_tools"
-
-def session_fifo_path():
-    fifo = os.environ.get("NSCDE_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    return runtime_client.session_fifo_path()
-
 
 def build_stylesheet(pal):
     bg = pal[0]
@@ -136,32 +130,13 @@ def build_stylesheet(pal):
     )
 
 
-def detect_power_support():
-    """Detect which power management actions are available."""
-    support = {
-        "suspend": False,
-        "hybrid-suspend": False,
-        "hibernate": False,
+def detect_power_support(capabilities):
+    """Read power support from runtime-published capabilities."""
+    return {
+        "suspend": capabilities.get("supports-power-suspend", "0") == "1",
+        "hybrid-suspend": capabilities.get("supports-power-hybrid-suspend", "0") == "1",
+        "hibernate": capabilities.get("supports-power-hibernate", "0") == "1",
     }
-    toolsdir = nscde_toolsdir()
-    acpimgr = os.path.join(toolsdir, "acpimgr")
-    if not os.path.exists(acpimgr):
-        return support
-
-    for action in support:
-        try:
-            result = subprocess.run(
-                [acpimgr, action, "systemd"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                support[action] = True
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
-
-    return support
 
 
 def get_action_items(power_support):
@@ -210,7 +185,8 @@ class NsCDESysAction(QWidget):
         self.setObjectName("NsCDESysAction")
         self.setMinimumWidth(460)
 
-        self.power_support = detect_power_support()
+        self.capabilities = runtime_client.query_state("capabilities")
+        self.power_support = detect_power_support(self.capabilities)
         self.action_items = get_action_items(self.power_support)
         self.current_palette = list(DEFAULT_PALETTE)
         self._runtime_subscription = None
@@ -287,7 +263,7 @@ class NsCDESysAction(QWidget):
     def _setup_runtime_subscription(self):
         try:
             self._runtime_subscription = runtime_client.RuntimeSubscription(
-                ["panel"], self
+                ["panel", "capabilities"], self
             )
         except RuntimeError as err:
             self._runtime_subscription = None
@@ -296,12 +272,19 @@ class NsCDESysAction(QWidget):
             return
 
         self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic(
+            "capabilities", self._handle_capabilities_state
+        )
 
     def _handle_panel_state(self, state):
         pal = runtime_client.read_palette(state)
         if pal != self.current_palette:
             self.current_palette = pal
             self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_capabilities_state(self, state):
+        self.capabilities = dict(state)
+        self.power_support = detect_power_support(self.capabilities)
 
     def _restore_last_action(self):
         last = read_last_action()
@@ -349,46 +332,45 @@ class NsCDESysAction(QWidget):
         super().closeEvent(event)
 
     def _do_logout(self):
-        try:
-            subprocess.Popen(["pkill", "-TERM", "labwc"])
-        except (FileNotFoundError, OSError):
-            pass
+        if not runtime_client.runtime_ctl("logout"):
+            QMessageBox.critical(
+                self,
+                "Runtime Error",
+                "Unable to logout via the runtime daemon.",
+            )
+            return
         QApplication.quit()
 
     def _do_restart(self):
         if not runtime_client.runtime_ctl("reload"):
-            fifo = session_fifo_path()
-            try:
-                with open(fifo, "w") as f:
-                    f.write("reload\n")
-            except (IOError, OSError):
-                try:
-                    subprocess.Popen(["labwc", "--reconfigure"])
-                except (FileNotFoundError, OSError):
-                    pass
+            QMessageBox.critical(
+                self,
+                "Runtime Error",
+                "Unable to reload via the runtime daemon.",
+            )
+            return
         QApplication.quit()
 
     def _do_failsafe(self):
-        for cmd in ["weston-terminal", "xterm", "foot", "alacritty"]:
-            try:
-                subprocess.Popen([cmd])
-                break
-            except (FileNotFoundError, OSError):
-                continue
+        if not runtime_client.runtime_ctl("failsafe"):
+            QMessageBox.critical(
+                self,
+                "Runtime Error",
+                "Unable to launch a failsafe terminal via the runtime daemon.",
+            )
+            return
         QApplication.quit()
 
     def _do_power(self, action):
-        toolsdir = nscde_toolsdir()
-        acpimgr = os.path.join(toolsdir, "acpimgr")
-        if not os.path.exists(acpimgr):
+        if not runtime_client.runtime_ctl("power", action):
+            QMessageBox.critical(
+                self,
+                "Runtime Error",
+                "Unable to execute power action '{}' via the runtime daemon.".format(
+                    action
+                ),
+            )
             return
-        try:
-            subprocess.Popen([acpimgr, action])
-        except (FileNotFoundError, OSError):
-            try:
-                subprocess.Popen(["sudo", "-n", acpimgr, action])
-            except (FileNotFoundError, OSError):
-                pass
         QApplication.quit()
 
     def _on_help(self):

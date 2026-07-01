@@ -566,34 +566,11 @@ class NsCDEColorMgr(QWidget):
             self.apply_btn.setText("Apply")
 
     def _record_and_apply(self, palette_name):
-        palette_path = None
-        user_pal = os.path.join(
-            nscde_fvwm_userdir(), "palettes", "{}.dp".format(palette_name)
-        )
-        sys_pal = os.path.join(
-            nscde_datadir(), "palettes", "{}.dp".format(palette_name)
-        )
-        if os.path.exists(user_pal):
-            palette_path = user_pal
-        elif os.path.exists(sys_pal):
-            palette_path = sys_pal
-
-        if not palette_path:
-            return
-
-        style_values = {
-            "NSCDE_PALETTE_PATH": palette_path,
-            "NSCDE_PALETTE_FILE": palette_path,
-            "NSCDE_PALETTE_NAME": palette_name,
-            "NSCDE_COLOR_MODE": str(self.ncolors),
-            "NSCDE_FP_VARIANT": self.style_state.get("NSCDE_FP_VARIANT", "5"),
-        }
-
-        if not runtime_client.runtime_style_set(style_values, apply=True):
+        if not runtime_client.runtime_color_select(palette_name, self.ncolors):
             append_debug_log(
                 "colormgr apply",
-                "runtime style-set failed for palette {} ({})".format(
-                    palette_name, palette_path
+                "runtime color-select failed for palette {} ({})".format(
+                    palette_name, self.ncolors
                 ),
             )
             QMessageBox.warning(

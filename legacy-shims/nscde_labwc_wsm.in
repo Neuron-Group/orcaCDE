@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QVBoxLayout,
     QWidget,
+    QMessageBox,
 )
 
 import nscde_runtime_client as runtime_client
@@ -117,41 +118,32 @@ def build_stylesheet(pal):
         bg=bg, fg=fg, hi=hi, sh=sh, acc=acc, sbg=sbg, sfg=sfg
     )
 
-
-def send_fifo_command(cmd):
-    fifo = runtime_client.session_fifo_path()
-    if not os.path.exists(fifo):
-        return
-    try:
-        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
-        os.write(fd, (cmd + "\n").encode("utf-8"))
-        os.close(fd)
-    except (OSError, BlockingIOError):
-        pass
-
-
-def send_pager_command(cmd):
-    fifo = runtime_client.pager_fifo_path()
-    if not os.path.exists(fifo):
-        return
-    try:
-        fd = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
-        os.write(fd, (cmd + "\n").encode("utf-8"))
-        os.close(fd)
-    except (OSError, BlockingIOError):
-        pass
-
-
 def send_workspace_switch(workspace_name):
-    if runtime_client.runtime_ctl("workspace-switch", workspace_name):
+    runtime_success, switch_success = runtime_client.runtime_workspace_switch(
+        workspace_name
+    )
+    if runtime_success and switch_success:
         return
-    send_pager_command("switch_workspace:{}".format(workspace_name))
+    if not runtime_success:
+        raise runtime_client.RuntimeUnavailableError(
+            "Unable to update workspace '{}' via the runtime daemon.".format(
+                workspace_name
+            )
+        )
+    raise runtime_client.RuntimeUnavailableError(
+        "Unable to switch workspace '{}' via the compositor bridge.".format(
+            workspace_name
+        )
+    )
 
 
 def send_workspace_rename(old_name, new_name):
-    if runtime_client.runtime_ctl("workspace-rename", old_name, new_name):
-        return
-    send_fifo_command("rename_workspace:{}:{}".format(old_name, new_name))
+    if not runtime_client.runtime_ctl("workspace-rename", old_name, new_name):
+        raise runtime_client.RuntimeUnavailableError(
+            "Unable to rename workspace '{}' to '{}' via the runtime daemon.".format(
+                old_name, new_name
+            )
+        )
 
 
 def read_workspaces():
@@ -181,7 +173,7 @@ class WorkspaceButton(QPushButton):
         self.style().polish(self)
 
     def _on_switch(self):
-        send_workspace_switch(self.ws_name)
+        self._parent_widget._switch_workspace(self.ws_name)
 
     def mouseDoubleClickEvent(self, event):
         self._parent_widget._start_rename(self)
@@ -324,7 +316,11 @@ class NsCDEWSM(QWidget):
         old_name = self._rename_target.ws_name
         new_name = self._rename_edit.text().strip()
         if new_name and new_name != old_name:
-            send_workspace_rename(old_name, new_name)
+            try:
+                send_workspace_rename(old_name, new_name)
+            except RuntimeError as err:
+                QMessageBox.critical(self, "Runtime Error", str(err))
+                return
         self._cancel_rename()
 
     def _cancel_rename(self):
@@ -332,6 +328,12 @@ class NsCDEWSM(QWidget):
         self._rename_label.setVisible(False)
         self._rename_cancel.setVisible(False)
         self._rename_target = None
+
+    def _switch_workspace(self, workspace_name):
+        try:
+            send_workspace_switch(workspace_name)
+        except RuntimeError as err:
+            QMessageBox.critical(self, "Runtime Error", str(err))
 
     def closeEvent(self, event):
         if self._runtime_subscription is not None:

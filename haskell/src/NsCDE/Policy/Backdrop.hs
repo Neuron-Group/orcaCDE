@@ -99,12 +99,14 @@ backdropCandidatePaths :: FilePath -> FilePath -> Int -> Maybe BackdropMode -> S
 backdropCandidatePaths fvwmUserDir dataDir deskNumber backdropMode backdropImage
   | null backdropImage = []
   | backdropMode == Just BackdropModeTiled =
-      [ fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".pm")
+      [ fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".png")
+      , fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".pm")
       , fvwmUserDir </> "backdrops" </> (backdropImage ++ ".pm")
       , dataDir </> "backdrops" </> (backdropImage ++ ".pm")
       ]
   | backdropMode == Just BackdropModePhoto || backdropMode == Just BackdropModeAspect =
-      [ fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".pm")
+      [ fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".png")
+      , fvwmUserDir </> "backer" </> ("Desk" ++ show deskNumber ++ "-" ++ backdropImage ++ ".pm")
       , fvwmUserDir </> "photos" </> (backdropImage ++ ".png")
       , dataDir </> "photos" </> (backdropImage ++ ".png")
       ]

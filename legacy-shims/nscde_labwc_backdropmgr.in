@@ -549,55 +549,16 @@ class NsCDEBackdropMgr(QWidget):
         QApplication.processEvents()
 
         try:
-            toolsdir = nscde_toolsdir()
             backend = os.environ.get("NSCDE_BACKEND", "labwc")
-
-            env = dict(os.environ)
-            env.setdefault("NSCDE_TOOLSDIR", toolsdir)
-            env.setdefault("NSCDE_DATADIR", nscde_datadir())
-            env.setdefault("FVWM_USERDIR", nscde_fvwm_userdir())
-            env.setdefault("NSCDE_BACKEND", backend)
-
-            palette_path = current_palette_path()
-
-            backer_dir = os.path.join(nscde_fvwm_userdir(), "backer")
-            os.makedirs(backer_dir, exist_ok=True)
-
             backdrop_name = os.path.splitext(os.path.basename(source_path))[0]
-            dest_name = "Desk{}-{}.pm".format(self.current_desk, backdrop_name)
-            dest_path = os.path.join(backer_dir, dest_name)
-
-            color_variant = self._get_color_variant()
-
-            if self._showing_backdrops:
-                cmd = [
-                    os.path.join(toolsdir, "palette_colorgen"),
-                    "-p", palette_path,
-                    "-n", str(self.ncolors),
-                    "-i", source_path,
-                    "-P", str(color_variant),
-                    "-b",
-                ]
-                result = subprocess.run(
-                    cmd, capture_output=True, timeout=30, env=env,
-                )
-                if result.returncode == 0:
-                    with open(dest_path, "wb") as f:
-                        f.write(result.stdout)
-            else:
-                import shutil
-
-                shutil.copy2(source_path, dest_path)
 
             if backend == "labwc":
-                style_values = {
-                    "NSCDE_BACKDROP_DESK_{}_MODE".format(self.current_desk): mode,
-                    "NSCDE_BACKDROP_DESK_{}_IMAGE".format(self.current_desk): backdrop_name,
-                }
-                if not runtime_client.runtime_style_set(style_values, apply=True):
+                if not runtime_client.runtime_backdrop_select(
+                    self.current_desk, mode, backdrop_name
+                ):
                     append_debug_log(
                         "backdrop apply",
-                        "runtime style-set failed for desk {} {} {}".format(
+                        "runtime backdrop-select failed for desk {} {} {}".format(
                             self.current_desk, mode, backdrop_name
                         ),
                     )

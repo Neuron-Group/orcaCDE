@@ -92,11 +92,22 @@ renderWorkspaceMenu workspaces =
   map renderWorkspaceItem (zip [1 :: Int ..] workspaces)
   where
     renderWorkspaceItem (index, name) =
-      MenuItem ("Workspace " ++ name) [GoToDesktop index]
+      MenuItem
+        ("Workspace " ++ name)
+        [ Execute (renderRuntimeWorkspaceCommand name)
+        , GoToDesktop index
+        ]
 
 renderWaylandQtCommand :: FilePath -> String
 renderWaylandQtCommand target =
   "sh -c " ++ shellQuote ("QT_QPA_PLATFORM=wayland " ++ target)
+
+renderRuntimeWorkspaceCommand :: String -> String
+renderRuntimeWorkspaceCommand workspaceName =
+  "sh -c "
+    ++ shellQuote "nscde-runtime ctl workspace-switch \"$1\""
+    ++ " sh "
+    ++ shellQuote workspaceName
 
 resolveWorkspaces :: [KeyValue] -> [String]
 resolveWorkspaces env =

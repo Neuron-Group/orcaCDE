@@ -162,6 +162,91 @@ nscde_runtime_publish_topic(const char *topic, const char *contents)
 }
 
 bool
+nscde_runtime_publisher_open(const char *role, const char *topics,
+	struct nscde_runtime_publisher *publisher)
+{
+	int fd = -1;
+	char request[PATH_MAX_LEN];
+	char *response;
+	struct nscde_runtime_frame frame = {0};
+	bool success = false;
+
+	if (!role || !role[0] || !topics || !topics[0] || !publisher) {
+		return false;
+	}
+
+	if (!connect_runtime_socket(false, &fd)) {
+		return false;
+	}
+
+	snprintf(request, sizeof(request),
+		"TYPE=publish-stream\nROLE=%s\nTOPICS=%s\n\n", role, topics);
+	if (!send_frame_request(fd, request)) {
+		close(fd);
+		return false;
+	}
+
+	response = read_response_frame(fd);
+	if (!response) {
+		close(fd);
+		return false;
+	}
+
+	frame.contents = response;
+	parse_frame_metadata(response, &frame);
+	success = frame.type == NSCDE_RUNTIME_FRAME_ACK;
+	nscde_runtime_frame_destroy(&frame);
+	if (!success) {
+		close(fd);
+		return false;
+	}
+
+	nscde_runtime_publisher_close(publisher);
+	publisher->fd = fd;
+	return true;
+}
+
+bool
+nscde_runtime_publisher_send(struct nscde_runtime_publisher *publisher,
+	const char *topic, const char *contents)
+{
+	char *request = NULL;
+	size_t request_len;
+
+	if (!publisher || publisher->fd < 0 || !topic || !topic[0]) {
+		return false;
+	}
+
+	request_len = strlen(topic) + strlen(contents ? contents : "") + 24;
+	request = malloc(request_len);
+	if (!request) {
+		return false;
+	}
+
+	snprintf(request, request_len, "TYPE=state\nTOPIC=%s\n%s\n",
+		topic, contents ? contents : "");
+	if (!send_frame_request(publisher->fd, request)) {
+		free(request);
+		return false;
+	}
+	free(request);
+	return true;
+}
+
+void
+nscde_runtime_publisher_close(struct nscde_runtime_publisher *publisher)
+{
+	if (!publisher) {
+		return;
+	}
+
+	if (publisher->fd >= 0) {
+		close(publisher->fd);
+	}
+	publisher->fd = -1;
+}
+
+bool
 nscde_runtime_subscribe_topics(const char *topics,
 	struct nscde_runtime_subscription *subscription)
 {
@@ -311,6 +396,124 @@ nscde_runtime_frame_destroy(struct nscde_runtime_frame *frame)
 
 	free(frame->contents);
 	memset(frame, 0, sizeof(*frame));
+}
+
+void
+nscde_fd_reactor_init(nscde_fd_reactor *reactor)
+{
+	size_t i;
+
+	if (!reactor) {
+		return;
+	}
+
+	memset(reactor, 0, sizeof(*reactor));
+	for (i = 0; i < NSCDE_FD_REACTOR_MAX_WATCHERS; i++) {
+		reactor->watchers[i].fd = -1;
+	}
+}
+
+bool
+nscde_fd_reactor_add(nscde_fd_reactor *reactor, int fd, short events,
+	nscde_fd_reactor_ready_fn on_ready,
+	nscde_fd_reactor_ready_fn on_error, void *userdata)
+{
+	size_t i;
+
+	if (!reactor || fd < 0 || !on_ready) {
+		return false;
+	}
+
+	for (i = 0; i < NSCDE_FD_REACTOR_MAX_WATCHERS; i++) {
+		if (!reactor->watchers[i].active) {
+			reactor->watchers[i].fd = fd;
+			reactor->watchers[i].events = events;
+			reactor->watchers[i].on_ready = on_ready;
+			reactor->watchers[i].on_error = on_error;
+			reactor->watchers[i].userdata = userdata;
+			reactor->watchers[i].active = true;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+void
+nscde_fd_reactor_remove(nscde_fd_reactor *reactor, int fd)
+{
+	size_t i;
+
+	if (!reactor) {
+		return;
+	}
+
+	for (i = 0; i < NSCDE_FD_REACTOR_MAX_WATCHERS; i++) {
+		if (reactor->watchers[i].active && reactor->watchers[i].fd == fd) {
+			reactor->watchers[i].active = false;
+			reactor->watchers[i].fd = -1;
+			reactor->watchers[i].events = 0;
+			reactor->watchers[i].on_ready = NULL;
+			reactor->watchers[i].on_error = NULL;
+			reactor->watchers[i].userdata = NULL;
+		}
+	}
+}
+
+bool
+nscde_fd_reactor_run_once(nscde_fd_reactor *reactor, int timeout_ms)
+{
+	struct pollfd pollfds[NSCDE_FD_REACTOR_MAX_WATCHERS];
+	nscde_fd_reactor_watcher *watchers[NSCDE_FD_REACTOR_MAX_WATCHERS];
+	size_t active_count = 0;
+	size_t i;
+	int ret;
+
+	if (!reactor) {
+		return false;
+	}
+
+	for (i = 0; i < NSCDE_FD_REACTOR_MAX_WATCHERS; i++) {
+		if (!reactor->watchers[i].active || reactor->watchers[i].fd < 0) {
+			continue;
+		}
+
+		pollfds[active_count].fd = reactor->watchers[i].fd;
+		pollfds[active_count].events = reactor->watchers[i].events;
+		pollfds[active_count].revents = 0;
+		watchers[active_count] = &reactor->watchers[i];
+		active_count++;
+	}
+
+	if (active_count == 0) {
+		errno = EINVAL;
+		return false;
+	}
+
+	ret = poll(pollfds, active_count, timeout_ms);
+	if (ret <= 0) {
+		return false;
+	}
+
+	for (i = 0; i < active_count; i++) {
+		short revents = pollfds[i].revents;
+		nscde_fd_reactor_watcher *watcher = watchers[i];
+
+		if (!revents || !watcher->active) {
+			continue;
+		}
+
+		if ((revents & (POLLERR | POLLHUP | POLLNVAL)) && watcher->on_error) {
+			watcher->on_error(watcher->fd, revents, watcher->userdata);
+			continue;
+		}
+
+		if ((revents & watcher->events) && watcher->on_ready) {
+			watcher->on_ready(watcher->fd, revents, watcher->userdata);
+		}
+	}
+
+	return true;
 }
 
 static bool

@@ -114,6 +114,35 @@ The top-level runtime shape should be:
    - persistent socket stream for live state consumers
    - primary event-driven read path for Qt clients and compatibility bridges
 
+Within `ctl`, the runtime also now owns typed artifact refresh intents:
+
+- `ctl refresh keybinds`
+- `ctl refresh menu`
+- `ctl refresh rc`
+- `ctl refresh theme`
+- `ctl refresh session`
+
+Those intents are narrower than a full backend `reload`: they let wrappers and
+tests request specific runtime-owned artifact regeneration without reintroducing
+direct local ownership of file-writing behavior.
+
+The runtime also now owns semantic color selection through:
+
+- `ctl color-select PALETTE COLORS`
+
+That command resolves palette names to concrete palette files inside the
+runtime layer and writes the normalized style state there, rather than leaving
+each GUI client to rediscover palette-path precedence on its own.
+
+The runtime also now owns backdrop selection and apply-time materialization through:
+
+- `ctl backdrop-select DESK MODE IMAGE`
+
+That command writes the normalized per-desk backdrop choice in the runtime
+layer and materializes the corresponding desk-specific `backer/DeskN-*.pm`
+asset there, so clients no longer need to decide which normalized keys to
+mutate or how the live backdrop artifact should be generated.
+
 ## Current implemented slice
 
 The current extracted runtime now owns these render-time paths directly:
@@ -143,6 +172,13 @@ The current extracted runtime now owns these render-time paths directly:
   - policy-routed apply dispatch
   - runtime-owned `rc.xml` regeneration during apply, rather than in-place XML
     patching in shell-era helpers
+  - runtime-owned reload now regenerates `labwc` keybind XML, `menu.xml`,
+    `rc.xml`, and theme files before sending the compositor reconfigure signal,
+    so a live `reload` replays the current `Haskell` policy outputs instead of
+    only reusing previously written artifacts
+  - the same regeneration path is now exposed as typed runtime refresh
+    commands, so targeted artifact updates use the daemon callback surface
+    instead of growing new wrapper-local regeneration helpers
   - the current direct `labwc` apply surface is intentionally narrower than the
     stored style schema: focus policy, auto-raise, and raise delay now feed the
     generated `rc.xml`; transient handling, icon placement, and page-edge
@@ -152,6 +188,9 @@ The current extracted runtime now owns these render-time paths directly:
     from the classic `NsCDE` backdrop cycle (`Ankh`, `BrickWall`, `Convex`,
     `Toronto`) so a fresh standalone session still resolves a real asset path
     before any user backdrop customization exists
+  - backdrop apply-time materialization for desk-specific `backer/DeskN-*.pm`
+    outputs now also lives in the runtime layer, leaving the PyQt backdrop
+    manager responsible only for UI preview and typed semantic apply requests
   - theme, backdrop, toolkit font integration, and reload orchestration
 - `autostart`, `environment`, and `shutdown`
   - typed session-file planning and rendering
@@ -187,8 +226,31 @@ The current compatibility shim boundary is:
   `nscde_labwc_backdropmgr`, `nscde_labwc_stylemgr`,
   `nscde_labwc_sysaction`, `nscde_labwc_sysinfo`, `nscde_labwc_fontmgr`,
   `nscde_labwc_windowmgr`
-  - now runtime-first clients with socket `query` / `subscribe`, with
-    env-file / FIFO fallback kept only as migration glue
+  - now runtime-first clients with socket `query` / `subscribe`
+  - `nscde_labwc_wsm` now also treats runtime `ctl` as the required live
+    command path and fails loudly instead of silently falling back to FIFO
+    control writes when the runtime is unavailable
+  - `nscde_labwc_iconbox` now does the same for restore, maximize, and close:
+    live window actions go through runtime `ctl`, and command failure is
+    surfaced instead of silently falling back to the compatibility toplevel
+    FIFO
+  - `nscde_labwc_sysaction` now also treats runtime `ctl reload` as the
+    required live restart path; it no longer silently falls back to session
+    FIFO writes or direct `labwc --reconfigure`
+  - `nscde_labwc_sysaction` logout now goes through runtime `ctl logout`
+    instead of directly terminating `labwc`, so session action semantics keep
+    moving behind the runtime command surface rather than staying in the GUI
+  - `nscde_labwc_sysaction` failsafe terminal launch now also goes through
+    runtime `ctl failsafe`, so the runtime owns terminal fallback resolution
+    order instead of leaving that behavior embedded in the dialog
+  - `nscde_labwc_sysaction` power actions now also go through runtime
+    `ctl power ...`, so `acpimgr` execution and its privilege fallback are
+    no longer owned directly by the dialog
+  - `nscde_labwc_sysaction` and `nscde_labwc_stylemgr` now also consume
+    runtime-published `capabilities` for power/system-action availability,
+    so the live UI no longer probes those backend support details locally
+  - remaining env-file / FIFO fallback in other tools is migration glue only,
+    not the intended live API surface
 - `nscde_labwc_taskd`
   - now a compatibility-only one-shot refresh shim
   - steady-state `taskd` state is derived by the runtime from `windows`

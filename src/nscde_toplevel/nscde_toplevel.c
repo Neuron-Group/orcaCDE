@@ -17,7 +17,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -61,6 +60,7 @@ static struct {
 	struct wl_registry *registry;
 	struct zwlr_foreign_toplevel_manager_v1 *manager;
 	struct wl_seat *seat;
+	struct nscde_runtime_publisher runtime_publisher;
 
 	struct toplevel toplevels[MAX_TOPLEVELS];
 	int toplevel_count;
@@ -77,6 +77,8 @@ static struct {
 	/* Running state */
 	bool running;
 	bool dirty;
+	bool wayland_read_armed;
+	bool wayland_events_read;
 } toplevel_state = {
 	.toplevel_count = 0,
 	.focused_title = "",
@@ -84,6 +86,7 @@ static struct {
 	.focused_id = 0,
 	.seat = NULL,
 	.session_fifo_fd = -1,
+	.runtime_publisher = {.fd = -1},
 	.running = true,
 	.dirty = true,
 };
@@ -111,6 +114,9 @@ find_toplevel_by_id(uint32_t id)
 	}
 	return NULL;
 }
+
+static void
+process_fifo_commands(void);
 
 /* Add a new toplevel */
 static struct toplevel *
@@ -192,12 +198,99 @@ update_state(void)
 
 	fclose(stream);
 
-	if (!nscde_runtime_publish_topic("windows", contents ? contents : "")) {
+	if (!nscde_runtime_publisher_send(&toplevel_state.runtime_publisher,
+		"windows", contents ? contents : "")) {
 		fprintf(stderr, "nscde_toplevel: failed to publish runtime windows state\n");
 	}
 
 	free(contents);
 	toplevel_state.dirty = false;
+}
+
+static bool
+prepare_wayland_wait(void)
+{
+	while (wl_display_prepare_read(toplevel_state.display) != 0) {
+		if (wl_display_dispatch_pending(toplevel_state.display) < 0) {
+			fprintf(stderr, "nscde_toplevel: dispatch pending failed\n");
+			toplevel_state.running = false;
+			return false;
+		}
+	}
+
+	if (wl_display_flush(toplevel_state.display) < 0) {
+		fprintf(stderr, "nscde_toplevel: flush failed\n");
+		toplevel_state.running = false;
+		return false;
+	}
+
+	toplevel_state.wayland_read_armed = true;
+	toplevel_state.wayland_events_read = false;
+	return true;
+}
+
+static void
+finish_wayland_wait(void)
+{
+	if (toplevel_state.wayland_read_armed &&
+		!toplevel_state.wayland_events_read) {
+		wl_display_cancel_read(toplevel_state.display);
+	}
+	toplevel_state.wayland_read_armed = false;
+}
+
+static void
+handle_wayland_ready(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+
+	if (wl_display_read_events(toplevel_state.display) < 0) {
+		fprintf(stderr, "nscde_toplevel: read events failed\n");
+		toplevel_state.running = false;
+		return;
+	}
+	toplevel_state.wayland_events_read = true;
+	toplevel_state.wayland_read_armed = false;
+
+	if (wl_display_dispatch_pending(toplevel_state.display) < 0) {
+		fprintf(stderr, "nscde_toplevel: dispatch failed\n");
+		toplevel_state.running = false;
+		return;
+	}
+	if (toplevel_state.dirty) {
+		update_state();
+	}
+}
+
+static void
+handle_wayland_error(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	fprintf(stderr, "nscde_toplevel: wayland fd error\n");
+	toplevel_state.running = false;
+}
+
+static void
+handle_fifo_ready(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	process_fifo_commands();
+}
+
+static void
+handle_fifo_error(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	fprintf(stderr, "nscde_toplevel: session fifo watcher error\n");
+	toplevel_state.running = false;
 }
 
 /* Protocol callbacks for toplevel handles */
@@ -629,8 +722,7 @@ int
 main(int argc, char *argv[])
 {
 	int opt;
-	struct pollfd fds[2];
-	int nfds;
+	nscde_fd_reactor reactor;
 
 	/* Parse arguments */
 	while ((opt = getopt(argc, argv, "hv")) != -1) {
@@ -657,6 +749,7 @@ main(int argc, char *argv[])
 
 	/* Setup signal handlers */
 	setup_signals();
+	nscde_fd_reactor_init(&reactor);
 
 	/* Connect to Wayland display */
 	toplevel_state.display = wl_display_connect(NULL);
@@ -698,87 +791,53 @@ main(int argc, char *argv[])
 	/* Open session FIFO */
 	toplevel_state.session_fifo_fd = open_session_fifo();
 
+	if (!nscde_runtime_publisher_open("toplevel", "windows",
+		&toplevel_state.runtime_publisher)) {
+		fprintf(stderr,
+		    "nscde_toplevel: failed to open runtime producer stream\n");
+		wl_display_disconnect(toplevel_state.display);
+		return 1;
+	}
+
 	/* Write initial state */
 	update_state();
 
 	/* Main event loop */
 	while (toplevel_state.running) {
-		/* Setup poll fds */
-		nfds = 0;
-
-		/* Wayland display fd */
-		fds[nfds].fd = wl_display_get_fd(toplevel_state.display);
-		fds[nfds].events = POLLIN;
-		nfds++;
-
-		/* Session FIFO fd (if open) */
-		if (toplevel_state.session_fifo_fd >= 0) {
-			fds[nfds].fd = toplevel_state.session_fifo_fd;
-			fds[nfds].events = POLLIN;
-			nfds++;
-		}
-
-		/* Dispatch pending Wayland events */
-		while (wl_display_prepare_read(toplevel_state.display) != 0) {
-			if (wl_display_dispatch_pending(toplevel_state.display) < 0) {
-				fprintf(stderr, "nscde_toplevel: dispatch pending failed\n");
-				toplevel_state.running = false;
-				break;
-			}
-		}
-
-		if (!toplevel_state.running) {
+		nscde_fd_reactor_init(&reactor);
+		if (!nscde_fd_reactor_add(&reactor,
+			wl_display_get_fd(toplevel_state.display), POLLIN,
+			handle_wayland_ready, handle_wayland_error, NULL)) {
+			fprintf(stderr,
+			    "nscde_toplevel: unable to register wayland watcher\n");
 			break;
 		}
-
-		/* Flush outgoing events */
-		if (wl_display_flush(toplevel_state.display) < 0) {
-			fprintf(stderr, "nscde_toplevel: flush failed\n");
-			toplevel_state.running = false;
+		if (toplevel_state.session_fifo_fd >= 0 &&
+			!nscde_fd_reactor_add(&reactor,
+			toplevel_state.session_fifo_fd, POLLIN,
+			handle_fifo_ready, handle_fifo_error, NULL)) {
+			fprintf(stderr,
+			    "nscde_toplevel: unable to register fifo watcher\n");
 			break;
 		}
-
-		/* Poll until the Wayland socket or command FIFO becomes readable. */
-		int ret = poll(fds, nfds, -1);
-		if (ret < 0) {
+		if (!prepare_wayland_wait()) {
+			break;
+		}
+		if (!nscde_fd_reactor_run_once(&reactor, -1)) {
 			if (errno == EINTR) {
 				if (caught_signal) {
 					fprintf(stderr, "nscde_toplevel: caught signal %d\n",
 					    caught_signal);
 					toplevel_state.running = false;
 				}
-				wl_display_cancel_read(toplevel_state.display);
+				finish_wayland_wait();
 				continue;
 			}
-			fprintf(stderr, "nscde_toplevel: poll error: %s\n",
+			fprintf(stderr, "nscde_toplevel: event wait error: %s\n",
 			    strerror(errno));
-			wl_display_cancel_read(toplevel_state.display);
 			break;
 		}
-
-		/* Handle Wayland events */
-		if (fds[0].revents & POLLIN) {
-			if (wl_display_read_events(toplevel_state.display) < 0) {
-				fprintf(stderr, "nscde_toplevel: read events failed\n");
-				toplevel_state.running = false;
-				break;
-			}
-			if (wl_display_dispatch_pending(toplevel_state.display) < 0) {
-				fprintf(stderr, "nscde_toplevel: dispatch failed\n");
-				toplevel_state.running = false;
-				break;
-			}
-			if (toplevel_state.dirty) {
-				update_state();
-			}
-		} else {
-			wl_display_cancel_read(toplevel_state.display);
-		}
-
-		/* Handle FIFO commands */
-		if (nfds > 1 && (fds[1].revents & POLLIN)) {
-			process_fifo_commands();
-		}
+		finish_wayland_wait();
 
 		/* Update state if dirty */
 		if (toplevel_state.dirty) {
@@ -790,6 +849,7 @@ main(int argc, char *argv[])
 	if (toplevel_state.session_fifo_fd >= 0) {
 		close(toplevel_state.session_fifo_fd);
 	}
+	nscde_runtime_publisher_close(&toplevel_state.runtime_publisher);
 
 	if (toplevel_state.manager) {
 		zwlr_foreign_toplevel_manager_v1_destroy(toplevel_state.manager);

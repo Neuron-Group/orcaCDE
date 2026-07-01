@@ -2,8 +2,9 @@
  * NsCDE workspace pager daemon for labwc backend.
  *
  * This is a Wayland client that uses ext-workspace-v1 protocol to track
- * workspace state and provide workspace switching. It replaces the
- * file-polled shell daemon with protocol-driven event handling.
+ * workspace state and provide workspace switching. It now publishes live
+ * snapshots through the runtime producer stream and waits on Wayland/FIFO
+ * readiness through the shared fd reactor.
  *
  * Writes state to pager.env for shell UI consumption.
  * Reads workspace switch requests from the session command FIFO.
@@ -17,7 +18,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
 #include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -56,6 +56,7 @@ static struct {
 	struct wl_display *display;
 	struct wl_registry *registry;
 	struct ext_workspace_manager_v1 *manager;
+	struct nscde_runtime_publisher runtime_publisher;
 
 	struct workspace workspaces[MAX_WORKSPACES];
 	int workspace_count;
@@ -70,10 +71,13 @@ static struct {
 	/* Running state */
 	bool running;
 	bool dirty;
+	bool wayland_read_armed;
+	bool wayland_events_read;
 } pager = {
 	.workspace_count = 0,
 	.current_workspace = "",
 	.session_fifo_fd = -1,
+	.runtime_publisher = {.fd = -1},
 	.running = true,
 	.dirty = true,
 };
@@ -103,6 +107,9 @@ find_workspace_by_name(const char *name)
 	}
 	return NULL;
 }
+
+static void
+process_fifo_commands(void);
 
 /* Add a new workspace */
 static struct workspace *
@@ -214,7 +221,13 @@ publish_runtime_topic(const char *topic, state_writer_fn writer)
 	writer(stream);
 	fclose(stream);
 
-	success = nscde_runtime_publish_topic(topic, contents ? contents : "");
+	if (pager.runtime_publisher.fd >= 0) {
+		success =
+			nscde_runtime_publisher_send(&pager.runtime_publisher, topic,
+				contents ? contents : "");
+	} else {
+		success = nscde_runtime_publish_topic(topic, contents ? contents : "");
+	}
 	if (!success) {
 		fprintf(stderr,
 		    "nscde_pagerd: failed to publish runtime %s state\n",
@@ -227,9 +240,98 @@ publish_runtime_topic(const char *topic, state_writer_fn writer)
 static void
 update_state(void)
 {
+	if (pager.runtime_publisher.fd < 0) {
+		nscde_runtime_publisher_open("pagerd", "workspaces,pager",
+			&pager.runtime_publisher);
+	}
 	publish_runtime_topic("workspaces", write_workspaces_state);
 	publish_runtime_topic("pager", write_pager_state);
 	pager.dirty = false;
+}
+
+static bool
+prepare_wayland_wait(void)
+{
+	while (wl_display_prepare_read(pager.display) != 0) {
+		if (wl_display_dispatch_pending(pager.display) < 0) {
+			fprintf(stderr, "nscde_pagerd: dispatch pending failed\n");
+			pager.running = false;
+			return false;
+		}
+	}
+
+	if (wl_display_flush(pager.display) < 0) {
+		fprintf(stderr, "nscde_pagerd: flush failed\n");
+		pager.running = false;
+		return false;
+	}
+
+	pager.wayland_read_armed = true;
+	pager.wayland_events_read = false;
+	return true;
+}
+
+static void
+finish_wayland_wait(void)
+{
+	if (pager.wayland_read_armed && !pager.wayland_events_read) {
+		wl_display_cancel_read(pager.display);
+	}
+	pager.wayland_read_armed = false;
+}
+
+static void
+handle_wayland_ready(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+
+	if (wl_display_read_events(pager.display) < 0) {
+		fprintf(stderr, "nscde_pagerd: read events failed\n");
+		pager.running = false;
+		return;
+	}
+	pager.wayland_events_read = true;
+	pager.wayland_read_armed = false;
+
+	if (wl_display_dispatch_pending(pager.display) < 0) {
+		fprintf(stderr, "nscde_pagerd: dispatch failed\n");
+		pager.running = false;
+		return;
+	}
+	if (pager.dirty) {
+		update_state();
+	}
+}
+
+static void
+handle_wayland_error(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	fprintf(stderr, "nscde_pagerd: wayland fd error\n");
+	pager.running = false;
+}
+
+static void
+handle_fifo_ready(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	process_fifo_commands();
+}
+
+static void
+handle_fifo_error(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	fprintf(stderr, "nscde_pagerd: session fifo watcher error\n");
+	pager.running = false;
 }
 
 /* Protocol callbacks */
@@ -588,8 +690,7 @@ int
 main(int argc, char *argv[])
 {
 	int opt;
-	struct pollfd fds[2];
-	int nfds;
+	nscde_fd_reactor reactor;
 
 	/* Parse arguments */
 	while ((opt = getopt(argc, argv, "hv")) != -1) {
@@ -616,6 +717,7 @@ main(int argc, char *argv[])
 
 	/* Setup signal handlers */
 	setup_signals();
+	nscde_fd_reactor_init(&reactor);
 
 	/* Connect to Wayland display */
 	pager.display = wl_display_connect(NULL);
@@ -657,87 +759,47 @@ main(int argc, char *argv[])
 	/* Open session FIFO */
 	pager.session_fifo_fd = open_session_fifo();
 
+	if (!nscde_runtime_publisher_open("pagerd", "workspaces,pager",
+		&pager.runtime_publisher)) {
+		fprintf(stderr,
+		    "nscde_pagerd: failed to open runtime producer stream at startup; will retry\n");
+	}
+
 	/* Write initial state */
 	update_state();
 
 	/* Main event loop */
 	while (pager.running) {
-		/* Setup poll fds */
-		nfds = 0;
-
-		/* Wayland display fd */
-		fds[nfds].fd = wl_display_get_fd(pager.display);
-		fds[nfds].events = POLLIN;
-		nfds++;
-
-		/* Session FIFO fd (if open) */
-		if (pager.session_fifo_fd >= 0) {
-			fds[nfds].fd = pager.session_fifo_fd;
-			fds[nfds].events = POLLIN;
-			nfds++;
-		}
-
-		/* Dispatch pending Wayland events */
-		while (wl_display_prepare_read(pager.display) != 0) {
-			if (wl_display_dispatch_pending(pager.display) < 0) {
-				fprintf(stderr, "nscde_pagerd: dispatch pending failed\n");
-				pager.running = false;
-				break;
-			}
-		}
-
-		if (!pager.running) {
+		nscde_fd_reactor_init(&reactor);
+		if (!nscde_fd_reactor_add(&reactor, wl_display_get_fd(pager.display),
+			POLLIN, handle_wayland_ready, handle_wayland_error, NULL)) {
+			fprintf(stderr, "nscde_pagerd: unable to register wayland watcher\n");
 			break;
 		}
-
-		/* Flush outgoing events */
-		if (wl_display_flush(pager.display) < 0) {
-			fprintf(stderr, "nscde_pagerd: flush failed\n");
-			pager.running = false;
+		if (pager.session_fifo_fd >= 0 &&
+			!nscde_fd_reactor_add(&reactor, pager.session_fifo_fd, POLLIN,
+			handle_fifo_ready, handle_fifo_error, NULL)) {
+			fprintf(stderr, "nscde_pagerd: unable to register fifo watcher\n");
 			break;
 		}
-
-		/* Poll until the Wayland socket or command FIFO becomes readable. */
-		int ret = poll(fds, nfds, -1);
-		if (ret < 0) {
+		if (!prepare_wayland_wait()) {
+			break;
+		}
+		if (!nscde_fd_reactor_run_once(&reactor, -1)) {
 			if (errno == EINTR) {
 				if (caught_signal) {
 					fprintf(stderr, "nscde_pagerd: caught signal %d\n",
 					    caught_signal);
 					pager.running = false;
 				}
-				wl_display_cancel_read(pager.display);
+				finish_wayland_wait();
 				continue;
 			}
-			fprintf(stderr, "nscde_pagerd: poll error: %s\n",
+			fprintf(stderr, "nscde_pagerd: event wait error: %s\n",
 			    strerror(errno));
-			wl_display_cancel_read(pager.display);
 			break;
 		}
-
-		/* Handle Wayland events */
-		if (fds[0].revents & POLLIN) {
-			if (wl_display_read_events(pager.display) < 0) {
-				fprintf(stderr, "nscde_pagerd: read events failed\n");
-				pager.running = false;
-				break;
-			}
-			if (wl_display_dispatch_pending(pager.display) < 0) {
-				fprintf(stderr, "nscde_pagerd: dispatch failed\n");
-				pager.running = false;
-				break;
-			}
-			if (pager.dirty) {
-				update_state();
-			}
-		} else {
-			wl_display_cancel_read(pager.display);
-		}
-
-		/* Handle FIFO commands */
-		if (nfds > 1 && (fds[1].revents & POLLIN)) {
-			process_fifo_commands();
-		}
+		finish_wayland_wait();
 
 		/* Update state if dirty */
 		if (pager.dirty) {
@@ -753,6 +815,7 @@ main(int argc, char *argv[])
 	if (pager.manager) {
 		ext_workspace_manager_v1_destroy(pager.manager);
 	}
+	nscde_runtime_publisher_close(&pager.runtime_publisher);
 
 	if (pager.registry) {
 		wl_registry_destroy(pager.registry);

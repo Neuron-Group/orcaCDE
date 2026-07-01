@@ -3,8 +3,10 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <poll.h>
 
 #define NSCDE_RUNTIME_FIELD_LEN 256
+#define NSCDE_FD_REACTOR_MAX_WATCHERS 16
 
 enum nscde_runtime_frame_type {
 	NSCDE_RUNTIME_FRAME_NONE = 0,
@@ -34,6 +36,26 @@ struct nscde_runtime_subscription {
 	size_t buffer_cap;
 };
 
+struct nscde_runtime_publisher {
+	int fd;
+};
+
+typedef void (*nscde_fd_reactor_ready_fn)(
+	int fd, short revents, void *userdata);
+
+typedef struct nscde_fd_reactor_watcher {
+	int fd;
+	short events;
+	nscde_fd_reactor_ready_fn on_ready;
+	nscde_fd_reactor_ready_fn on_error;
+	void *userdata;
+	bool active;
+} nscde_fd_reactor_watcher;
+
+typedef struct nscde_fd_reactor {
+	nscde_fd_reactor_watcher watchers[NSCDE_FD_REACTOR_MAX_WATCHERS];
+} nscde_fd_reactor;
+
 typedef void (*nscde_runtime_frame_handler_fn)(
 	const struct nscde_runtime_frame *frame, void *userdata);
 
@@ -45,6 +67,17 @@ nscde_runtime_ctl_workspace_switch(const char *workspace_name);
 
 bool
 nscde_runtime_publish_topic(const char *topic, const char *contents);
+
+bool
+nscde_runtime_publisher_open(const char *role, const char *topics,
+	struct nscde_runtime_publisher *publisher);
+
+bool
+nscde_runtime_publisher_send(struct nscde_runtime_publisher *publisher,
+	const char *topic, const char *contents);
+
+void
+nscde_runtime_publisher_close(struct nscde_runtime_publisher *publisher);
 
 bool
 nscde_runtime_subscribe_topics(const char *topics,
@@ -67,5 +100,19 @@ nscde_runtime_subscription_close(struct nscde_runtime_subscription *subscription
 
 void
 nscde_runtime_frame_destroy(struct nscde_runtime_frame *frame);
+
+void
+nscde_fd_reactor_init(nscde_fd_reactor *reactor);
+
+bool
+nscde_fd_reactor_add(nscde_fd_reactor *reactor, int fd, short events,
+	nscde_fd_reactor_ready_fn on_ready,
+	nscde_fd_reactor_ready_fn on_error, void *userdata);
+
+void
+nscde_fd_reactor_remove(nscde_fd_reactor *reactor, int fd);
+
+bool
+nscde_fd_reactor_run_once(nscde_fd_reactor *reactor, int timeout_ms);
 
 #endif

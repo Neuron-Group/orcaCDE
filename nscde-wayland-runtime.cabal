@@ -40,8 +40,11 @@ library
     , NsCDE.Policy.SessionPlan
     , NsCDE.Policy.StyleApply
     , NsCDE.Runtime.Daemon
+    , NsCDE.Runtime.Backend
+    , NsCDE.Runtime.Labwc
     , NsCDE.Runtime.Protocol
     , NsCDE.Runtime.State
+    , NsCDE.Runtime.TopicState
     , NsCDE.Store.BackdropState
     , NsCDE.Store.StyleState
   build-depends:

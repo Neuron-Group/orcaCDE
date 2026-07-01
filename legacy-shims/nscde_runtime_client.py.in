@@ -195,6 +195,66 @@ def runtime_style_apply():
     return response.get("TYPE", "") == "ack"
 
 
+def runtime_refresh(target):
+    response = runtime_request_frame({
+        "TYPE": "command",
+        "NAME": "refresh",
+        "TARGET": target,
+    })
+    if response is None:
+        return False
+    return response.get("TYPE", "") == "ack"
+
+
+def runtime_color_select(palette_name, color_count):
+    response = runtime_request_frame({
+        "TYPE": "command",
+        "NAME": "color-select",
+        "PALETTE": palette_name,
+        "COLORS": str(color_count),
+    })
+    if response is None:
+        return False
+    return response.get("TYPE", "") == "ack"
+
+
+def runtime_backdrop_select(desk_number, mode, image_name):
+    response = runtime_request_frame({
+        "TYPE": "command",
+        "NAME": "backdrop-select",
+        "DESK": str(desk_number),
+        "MODE": mode,
+        "IMAGE": image_name,
+    })
+    if response is None:
+        return False
+    return response.get("TYPE", "") == "ack"
+
+
+def write_fifo_command(path, command_line):
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    except OSError:
+        return False
+
+    try:
+        os.write(fd, (command_line + "\n").encode("utf-8"))
+        return True
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def runtime_workspace_switch(workspace_name):
+    runtime_success = runtime_ctl("workspace-switch", workspace_name)
+    switch_success = write_fifo_command(
+        pager_fifo_path(),
+        "switch_workspace:{}".format(workspace_name),
+    )
+    return runtime_success, switch_success
+
+
 def query_state(topic):
     state = runtime_query_state(topic)
     if state is None:
@@ -429,10 +489,47 @@ def build_runtime_ctl_frame(args):
             "OLD": args[1],
             "NEW": args[2],
         }
+    if command == "color-select" and len(args) == 3:
+        return {
+            "TYPE": "command",
+            "NAME": "color-select",
+            "PALETTE": args[1],
+            "COLORS": args[2],
+        }
+    if command == "backdrop-select" and len(args) == 4:
+        return {
+            "TYPE": "command",
+            "NAME": "backdrop-select",
+            "DESK": args[1],
+            "MODE": args[2],
+            "IMAGE": args[3],
+        }
     if command == "reload" and len(args) == 1:
         return {
             "TYPE": "command",
             "NAME": "reload",
+        }
+    if command == "refresh" and len(args) == 2:
+        return {
+            "TYPE": "command",
+            "NAME": "refresh",
+            "TARGET": args[1],
+        }
+    if command == "logout" and len(args) == 1:
+        return {
+            "TYPE": "command",
+            "NAME": "logout",
+        }
+    if command == "failsafe" and len(args) == 1:
+        return {
+            "TYPE": "command",
+            "NAME": "failsafe",
+        }
+    if command == "power" and len(args) == 2:
+        return {
+            "TYPE": "command",
+            "NAME": "power",
+            "ACTION": args[1],
         }
     if command == "window" and len(args) == 3:
         return {

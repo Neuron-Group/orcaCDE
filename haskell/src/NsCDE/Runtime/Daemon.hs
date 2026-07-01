@@ -62,6 +62,11 @@ import NsCDE.Foundation.Paths
 import NsCDE.Runtime.Protocol
 import NsCDE.Runtime.State
 
+data ProducerStreamStop
+  = ProducerStreamDisconnected
+  | ProducerStreamRejected
+  deriving (Show)
+
 data ServerState = ServerState
   { serverRuntimeState :: RuntimeState
   , serverNextSubscriberId :: Int
@@ -163,6 +168,8 @@ handleClient stateVar clientSocket = do
       hClose handle
     Right request ->
       case request of
+        RequestPublishStream producerRole topics ->
+          handleProducerStream stateVar handle producerRole topics
         RequestSubscribe topics ->
           handleSubscription stateVar handle topics
         _ -> do
@@ -175,6 +182,10 @@ handleRequest stateVar request =
   case request of
     RequestHello maybeRole ->
       pure (ResponseAck ("hello" ++ maybe "" (" " ++) maybeRole))
+    RequestPublishStream _ _ ->
+      pure (ResponseError "publish-stream requests must use the persistent socket path")
+    RequestProducerState _ _ ->
+      pure (ResponseError "producer state frames must use the persistent publish-stream path")
     RequestSubscribe _ ->
       pure (ResponseError "subscribe requests must use the persistent socket path")
     RequestQuery topic -> do
@@ -227,6 +238,61 @@ handleSubscription stateVar handle requestedTopics =
         `finally` (removeSubscriber stateVar subscriberKey >> hClose handle)
   where
     topics = uniqueTopics requestedTopics
+
+handleProducerStream :: MVar ServerState -> Handle -> RuntimeProducerRole -> [RuntimeTopic] -> IO ()
+handleProducerStream stateVar handle producerRole requestedTopics =
+  if not (producerTopicsValid producerRole topics)
+    then do
+      writeFrame handle (encodeResponse (ResponseError "producer stream topic set rejected"))
+      hClose handle
+    else
+      ( catchIOError
+          (do
+            writeFrame handle (encodeResponse (ResponseAck "producer stream accepted"))
+            hFlush handle
+            producerLoop)
+          (\_ -> pure ())
+      ) `finally` hClose handle
+  where
+    topics = uniqueTopics requestedTopics
+    producerLoop =
+      catchProducerStop $
+        forever $ do
+          requestFrame <- readFrame handle
+          if null requestFrame
+            then stopProducerStream ProducerStreamDisconnected
+            else
+              case decodeRequest requestFrame of
+                Right (RequestProducerState topic entries)
+                  | topic `elem` topics -> do
+                      changedTopics <- applyProducerState stateVar producerRole topic entries
+                      broadcastTopics stateVar changedTopics
+                Right (RequestProducerState _ _) -> do
+                  writeFrame handle (encodeResponse (ResponseError "producer stream topic not owned by role"))
+                  hFlush handle
+                  stopProducerStream ProducerStreamRejected
+                Right _ -> do
+                  writeFrame handle (encodeResponse (ResponseError "producer stream only accepts state frames"))
+                  hFlush handle
+                  stopProducerStream ProducerStreamRejected
+                Left message -> do
+                  writeFrame handle (encodeResponse (ResponseError message))
+                  hFlush handle
+                  stopProducerStream ProducerStreamRejected
+
+producerTopicsValid :: RuntimeProducerRole -> [RuntimeTopic] -> Bool
+producerTopicsValid producerRole topics =
+  not (null topics) && all (`elem` producerTopicsAllowed producerRole) topics
+
+applyProducerState :: MVar ServerState -> RuntimeProducerRole -> RuntimeTopic -> [KeyValue] -> IO [RuntimeTopic]
+applyProducerState stateVar producerRole topic entries =
+  modifyMVar stateVar $ \serverState -> do
+    transition <- publishProducerState producerRole topic entries (serverRuntimeState serverState)
+    writeCompatibilityOutputs (runtimeTransitionState transition)
+    pure
+      ( serverState {serverRuntimeState = runtimeTransitionState transition}
+      , runtimeTransitionTopics transition
+      )
 
 sendInitialState :: Handle -> [RuntimeTopic] -> RuntimeState -> IO ()
 sendInitialState handle topics runtimeState =
@@ -358,9 +424,40 @@ commandFrame command =
       , ("OLD", oldWorkspace)
       , ("NEW", newWorkspace)
       ]
+    CommandColorSelect paletteName colorCount ->
+      [ ("TYPE", "command")
+      , ("NAME", "color-select")
+      , ("PALETTE", paletteName)
+      , ("COLORS", show colorCount)
+      ]
+    CommandBackdropSelect deskNumber modeText imageName ->
+      [ ("TYPE", "command")
+      , ("NAME", "backdrop-select")
+      , ("DESK", show deskNumber)
+      , ("MODE", modeText)
+      , ("IMAGE", imageName)
+      ]
     CommandReload ->
       [ ("TYPE", "command")
       , ("NAME", "reload")
+      ]
+    CommandRefresh refreshTarget ->
+      [ ("TYPE", "command")
+      , ("NAME", "refresh")
+      , ("TARGET", renderRuntimeRefreshTarget refreshTarget)
+      ]
+    CommandLogout ->
+      [ ("TYPE", "command")
+      , ("NAME", "logout")
+      ]
+    CommandFailsafe ->
+      [ ("TYPE", "command")
+      , ("NAME", "failsafe")
+      ]
+    CommandPower powerAction ->
+      [ ("TYPE", "command")
+      , ("NAME", "power")
+      , ("ACTION", renderPowerAction powerAction)
       ]
     CommandPublishState topic entries ->
       [ ("TYPE", "command")
@@ -381,6 +478,15 @@ commandFrame command =
       , ("NAME", "window-" ++ renderRuntimeWindowCommand windowCommand)
       , ("ID", show windowId)
       ]
+
+renderPowerAction :: RuntimePowerAction -> String
+renderPowerAction powerAction =
+  case powerAction of
+    PowerShutdown -> "poweroff"
+    PowerReboot -> "reboot"
+    PowerSuspend -> "suspend"
+    PowerHybridSuspend -> "hybrid-suspend"
+    PowerHibernate -> "hibernate"
 
 cleanupSocket :: FilePath -> IO ()
 cleanupSocket socketPath =
@@ -433,6 +539,18 @@ failWith :: String -> IO ()
 failWith message = do
   hPutStrLn stderr message
   exitFailure
+
+stopProducerStream :: ProducerStreamStop -> IO a
+stopProducerStream reason =
+  ioError (userError (show reason))
+
+catchProducerStop :: IO () -> IO ()
+catchProducerStop action =
+  catchIOError action $ \err ->
+    case show err of
+      "ProducerStreamDisconnected" -> pure ()
+      "ProducerStreamRejected" -> pure ()
+      _ -> ioError err
 
 streamSubscription :: Handle -> IO ()
 streamSubscription handle =

@@ -219,12 +219,6 @@ publish_menu_xml()
       startup_log "menugen:runtime:failed"
    fi
 
-   if [ -x "$NSCDE_TOOLSDIR/nscde_labwc_menugen" ]; then
-      "$NSCDE_TOOLSDIR/nscde_labwc_menugen" > "$NSCDE_LABWC_CONFIG_DIR/menu.xml"
-      startup_log "menugen:shim:done"
-      return 0
-   fi
-
    echo "nscde_labwc: unable to generate menu.xml" >&2
    startup_log "menugen:missing"
    return 1
@@ -392,11 +386,11 @@ resolve_title_font()
    _labwc_title_font_weight="bold"
    _labwc_title_font_slant="normal"
 
-   if [ ! -r "$NSCDE_TOOLSDIR/getfont" ]; then
+   if [ ! -x "$NSCDE_TOOLSDIR/getfont" ]; then
       return
    fi
 
-   _font_spec=$(ksh "$NSCDE_TOOLSDIR/getfont" -v -t bold -s large 2>/dev/null)
+   _font_spec=$("$NSCDE_TOOLSDIR/getfont" -v -t bold -s large 2>/dev/null)
    case "$_font_spec" in
       xft:*)
          _font_body=${_font_spec#xft:}

@@ -101,7 +101,7 @@ MANAGER_BUTTONS = [
     ("Screen", "screen", False),
     ("Window", "window", True),
     ("Desks", "desks", True),
-    ("Power", "power", False),
+    ("Power", "power", True),
     ("Startup", "startup", False),
 ]
 
@@ -114,6 +114,7 @@ class NsCDEStyleMgr(QWidget):
         self.setMinimumWidth(790)
 
         self.current_palette = list(DEFAULT_PALETTE)
+        self.capabilities = {}
         self._runtime_subscription = None
         self._build_ui()
         self._apply_stylesheet()
@@ -170,7 +171,7 @@ class NsCDEStyleMgr(QWidget):
     def _setup_runtime_subscription(self):
         try:
             self._runtime_subscription = runtime_client.RuntimeSubscription(
-                ["panel"], self
+                ["panel", "capabilities"], self
             )
         except RuntimeError as err:
             self._runtime_subscription = None
@@ -179,12 +180,19 @@ class NsCDEStyleMgr(QWidget):
             return
 
         self._runtime_subscription.on_topic("panel", self._handle_panel_state)
+        self._runtime_subscription.on_topic(
+            "capabilities", self._handle_capabilities_state
+        )
 
     def _handle_panel_state(self, state):
         pal = runtime_client.read_palette(state)
         if pal != self.current_palette:
             self.current_palette = pal
             self.setStyleSheet(build_stylesheet(pal))
+
+    def _handle_capabilities_state(self, state):
+        self.capabilities = dict(state)
+        self._update_runtime_buttons()
 
     def _launch_manager(self, key):
         toolsdir = nscde_toolsdir()
@@ -197,6 +205,7 @@ class NsCDEStyleMgr(QWidget):
             "backdrop": "nscde_labwc_backdropmgr",
             "window": "nscde_labwc_windowmgr",
             "desks": "nscde_labwc_wsm",
+            "power": "nscde_labwc_sysaction",
         }
 
         manager_script = manager_map.get(key)
@@ -209,6 +218,17 @@ class NsCDEStyleMgr(QWidget):
         launcher = os.path.join(toolsdir, "nscde_stylemgr")
         if os.path.exists(launcher):
             subprocess.Popen([launcher, key], env=env)
+
+    def _update_runtime_buttons(self):
+        power_button = self.buttons.get("power")
+        if power_button is not None:
+            power_button.setEnabled(
+                self.capabilities.get("supports-power-shutdown", "0") == "1"
+                or self.capabilities.get("supports-power-reboot", "0") == "1"
+                or self.capabilities.get("supports-power-suspend", "0") == "1"
+                or self.capabilities.get("supports-power-hybrid-suspend", "0") == "1"
+                or self.capabilities.get("supports-power-hibernate", "0") == "1"
+            )
 
     def closeEvent(self, event):
         if self._runtime_subscription is not None:

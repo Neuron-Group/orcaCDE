@@ -46,9 +46,15 @@ decodeRequest frame =
   case lookupText frame "TYPE" "" of
     "hello" ->
       Right (RequestHello (lookupValue frame "ROLE"))
+    "publish-stream" ->
+      decodePublishStream frame
     "subscribe" ->
       let topics = mapMaybe parseRuntimeTopic (splitCommaList (lookupText frame "TOPICS" ""))
       in Right (RequestSubscribe topics)
+    "state" ->
+      case parseRuntimeTopic (lookupText frame "TOPIC" "") of
+        Just topic -> Right (RequestProducerState topic (publishStateEntries frame))
+        Nothing -> Left "unsupported producer state topic"
     "query" ->
       case parseRuntimeTopic (lookupText frame "TOPIC" "") of
         Just topic -> Right (RequestQuery topic)
@@ -74,6 +80,15 @@ encodeResponse response =
       , ("MESSAGE", message)
       ]
 
+decodePublishStream :: [KeyValue] -> Either String RuntimeRequest
+decodePublishStream frame =
+  case parseRuntimeProducerRole (lookupText frame "ROLE" "") of
+    Just producerRole ->
+      let topics = mapMaybe parseRuntimeTopic (splitCommaList (lookupText frame "TOPICS" ""))
+      in Right (RequestPublishStream producerRole topics)
+    Nothing ->
+      Left "unsupported producer role"
+
 decodeCommand :: [KeyValue] -> Either String RuntimeRequest
 decodeCommand frame =
   let commandName = trim (lookupText frame "NAME" "")
@@ -96,12 +111,51 @@ decodeCommand frame =
              Left "unsupported publish topic"
        "reload" ->
          Right (RequestCommand CommandReload)
+       "refresh" ->
+         case parseRuntimeRefreshTarget (lookupText frame "TARGET" "") of
+           Just refreshTarget ->
+             Right (RequestCommand (CommandRefresh refreshTarget))
+           Nothing ->
+             Left "unsupported refresh target"
+       "logout" ->
+         Right (RequestCommand CommandLogout)
+       "failsafe" ->
+         Right (RequestCommand CommandFailsafe)
+       "power" ->
+         case lookupText frame "ACTION" "" of
+           "poweroff" -> Right (RequestCommand (CommandPower PowerShutdown))
+           "reboot" -> Right (RequestCommand (CommandPower PowerReboot))
+           "suspend" -> Right (RequestCommand (CommandPower PowerSuspend))
+           "hybrid-suspend" -> Right (RequestCommand (CommandPower PowerHybridSuspend))
+           "hibernate" -> Right (RequestCommand (CommandPower PowerHibernate))
+           _ -> Left "unsupported power action"
        "style-set" ->
          Right
            (RequestCommand
              (CommandStyleSet
                (styleSetEntries frame)
                (lookupText frame "APPLY" "0" == "1")))
+       "color-select" ->
+         case reads (lookupText frame "COLORS" "") of
+           [(colorCount, "")] ->
+             Right
+               (RequestCommand
+                 (CommandColorSelect
+                   (lookupText frame "PALETTE" "")
+                   colorCount))
+           _ ->
+             Left "invalid color count"
+       "backdrop-select" ->
+         case reads (lookupText frame "DESK" "") of
+           [(deskNumber, "")] ->
+             Right
+               (RequestCommand
+                 (CommandBackdropSelect
+                   deskNumber
+                   (lookupText frame "MODE" "")
+                   (lookupText frame "IMAGE" "")))
+           _ ->
+             Left "invalid desk number"
        "style-apply" ->
          Right (RequestCommand CommandStyleApply)
        _ | "window-" `isPrefixOf` commandName ->

@@ -40,9 +40,10 @@ FONTSET_NAME="DejaVuSerif"
 FONT_VARIABLE_NORMAL_MEDIUM='xft:DejaVu Serif:Medium:Book:size=11'
 FONT_MONOSPACED_NORMAL_MEDIUM='xft:DejaVu Sans Mono:Medium:Book:size=12'
 BACKER_DIR="$FVWM_USERDIR/backer"
+BACKDROP_SOURCE_DIR="$FVWM_USERDIR/backdrops"
 BACKDROP_NAME="RuntimeCheckBackdrop"
-BACKDROP_FILE="$BACKER_DIR/Desk1-$BACKDROP_NAME.pm"
-DEFAULT_BACKDROP_FILE="$ROOT_DIR/assets/backdrops/Ankh.pm"
+BACKDROP_FILE="$BACKER_DIR/Desk1-$BACKDROP_NAME.png"
+DEFAULT_BACKDROP_FILE="$BACKER_DIR/Desk1-Ankh.png"
 BACKDROP_STATE_FILE="$STATE_DIR/backdrops.env"
 BOGUS_BACKDROP_FILE="$WORK_DIR/bogus-backdrop.pm"
 SWAYBG_LOG="$WORK_DIR/swaybg.log"
@@ -203,8 +204,15 @@ NSCDE_STATIC_SESSION_ENV_FILE="$NSCDE_STATIC_SESSION_ENV_FILE" \
 "$RUNTIME_BIN" labwc-session publish "$CONFIG_DIR"
 
 mkdir -p "$STATE_DIR" "$FVWM_USERDIR" "$GTK3_SETTINGS_DIR" "$QT5CT_DIR"
-mkdir -p "$BACKER_DIR"
-printf '%s\n' 'runtime-check-backdrop' > "$BACKDROP_FILE"
+mkdir -p "$BACKER_DIR" "$BACKDROP_SOURCE_DIR"
+cat > "$BACKDROP_SOURCE_DIR/$BACKDROP_NAME.pm" <<'EOF'
+/* XPM */
+static char * runtime_check_backdrop[] = {
+"1 1 1 1",
+"  c #123456",
+" "
+};
+EOF
 
 cat > "$STYLE_MGR_INI" <<EOF
 [FontMgr]
@@ -313,7 +321,9 @@ mv "$STYLE_FILE" "$STYLE_FILE_SAVED"
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 python - <<'EOF' > "$PY_STYLE_QUERY_FILE"
-path = "legacy-shims/nscde_runtime_client.py.in"
+import os
+root_dir = os.environ["NSCDE_RUNTIME_ROOT"]
+path = os.path.join(root_dir, "legacy-shims", "nscde_runtime_client.py.in")
 ns = {"__name__": "runtime_client_test", "__file__": path}
 with open(path, "r", encoding="utf-8") as handle:
    code = compile(handle.read(), path, "exec")
@@ -364,6 +374,21 @@ grep -q '^NSCDE_TASK_COUNT=0$' "$STATE_DIR/taskd.env"
 grep -q '^NSCDE_TASK_FOCUSED=$' "$STATE_DIR/taskd.env"
 grep -q '^NSCDE_TASK_COMMAND_FIFO='"$STATE_DIR"'/topleveld.fifo$' "$STATE_DIR/taskd.env"
 
+if grep -q "send_fifo_command\\|send_pager_command" "$TOOLS_DIR/nscde_labwc_wsm"; then
+   echo "runtime-check: workspace manager still contains FIFO control fallback" >&2
+   exit 1
+fi
+
+if grep -q "send_fifo_command" "$TOOLS_DIR/nscde_labwc_iconbox"; then
+   echo "runtime-check: icon box still contains FIFO control fallback" >&2
+   exit 1
+fi
+
+if grep -q "session_fifo_path\\|labwc\", \"--reconfigure\\|pkill\", \"-TERM\", \"labwc\\|weston-terminal\\|\"xterm\"\\|\"foot\"\\|\"alacritty\"\\|acpimgr\\|sudo\", \"-n\"" "$TOOLS_DIR/nscde_labwc_sysaction"; then
+   echo "runtime-check: sysaction still contains direct logout/reload/failsafe/power fallback outside the runtime daemon" >&2
+   exit 1
+fi
+
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" ctl workspace-switch Beta
@@ -413,6 +438,39 @@ NSCDE_STATE_DIR="$STATE_DIR" \
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" ctl style-set NSCDE_BACKDROP_DESK_1_IMAGE "$BACKDROP_NAME"
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl color-select Charcoal 8
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl backdrop-select 1 tiled "$BACKDROP_NAME"
+
+attempt=0
+while ! test -s "$BACKDROP_FILE"; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: runtime-owned backdrop materialization did not refresh Desk1 asset" >&2
+      ls -l "$BACKER_DIR" >&2 || true
+      cat "$DAEMON_LOG" >&2 || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
+if ! identify "$BACKDROP_FILE" >/dev/null 2>&1; then
+   echo "runtime-check: runtime-owned backdrop materialization did not produce a valid PNG asset" >&2
+   ls -l "$BACKER_DIR" >&2 || true
+   identify "$BACKDROP_FILE" >&2 || true
+   exit 1
+fi
+
+cat > "$KEYBIND_FILE" <<EOF
+<keyboard>
+  <bogus />
+</keyboard>
+EOF
 
 HOME="$WORK_DIR/home" \
 NSCDE_STATE_DIR="$STATE_DIR" \
@@ -511,6 +569,66 @@ grep -q '^NSCDE_PANEL_PROFILE=reference$' "$PANEL_LAYOUT_FILE"
 grep -q '^NSCDE_LABWC_WORKSPACES=Alpha,Beta$' "$CONFIG_DIR/environment"
 grep -q '<keyboard>' "$KEYBIND_FILE"
 grep -q 'W-Return' "$KEYBIND_FILE"
+if grep -q '<bogus />' "$KEYBIND_FILE"; then
+   echo "runtime-check: daemon-owned style-apply did not refresh labwc keybind xml" >&2
+   exit 1
+fi
+
+cat > "$KEYBIND_FILE" <<EOF
+<keyboard>
+  <refresh-bogus />
+</keyboard>
+EOF
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl refresh keybinds
+
+attempt=0
+while grep -q '<refresh-bogus />' "$KEYBIND_FILE" 2>/dev/null; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: daemon-owned refresh keybinds did not refresh labwc keybind xml" >&2
+      cat "$DAEMON_LOG" >&2 || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
+cat > "$CONFIG_DIR/menu.xml" <<EOF
+<broken-menu />
+EOF
+
+cat > "$CONFIG_DIR/rc.xml" <<EOF
+<broken-rc />
+EOF
+
+HOME="$WORK_DIR/home" \
+NSCDE_STATE_DIR="$STATE_DIR" \
+"$RUNTIME_BIN" ctl reload
+
+attempt=0
+while grep -q '<broken-menu />' "$CONFIG_DIR/menu.xml" 2>/dev/null; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: daemon-owned reload did not refresh menu.xml" >&2
+      cat "$DAEMON_LOG" >&2 || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
+attempt=0
+while grep -q '<broken-rc />' "$CONFIG_DIR/rc.xml" 2>/dev/null; do
+   attempt=$((attempt + 1))
+   if [ "$attempt" -ge 50 ]; then
+      echo "runtime-check: daemon-owned reload did not refresh rc.xml" >&2
+      cat "$DAEMON_LOG" >&2 || true
+      exit 1
+   fi
+   sleep 0.1
+done
+
 grep -q 'nscde-runtime.*daemon' "$CONFIG_DIR/autostart"
 grep -q '<item label="Style Manager">' "$CONFIG_DIR/menu.xml"
 grep -q '<item label="Workspace Alpha">' "$CONFIG_DIR/menu.xml"

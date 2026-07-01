@@ -1,10 +1,17 @@
 module NsCDE.Domain.Runtime
   ( RuntimeCommand(..)
+  , RuntimePowerAction(..)
+  , RuntimeRefreshTarget(..)
+  , RuntimeProducerRole(..)
   , RuntimeRequest(..)
   , RuntimeResponse(..)
   , RuntimeStyleContext(..)
   , RuntimeTopic(..)
   , RuntimeWindowCommand(..)
+  , parseRuntimeProducerRole
+  , parseRuntimeRefreshTarget
+  , renderRuntimeProducerRole
+  , renderRuntimeRefreshTarget
   , parseRuntimeTopic
   , parseRuntimeWindowCommand
   , renderRuntimeTopic
@@ -37,18 +44,47 @@ data RuntimeWindowCommand
   | WindowMaximize
   deriving (Eq, Show)
 
+data RuntimeProducerRole
+  = ProducerPager
+  | ProducerToplevel
+  deriving (Eq, Show)
+
+data RuntimePowerAction
+  = PowerShutdown
+  | PowerReboot
+  | PowerSuspend
+  | PowerHybridSuspend
+  | PowerHibernate
+  deriving (Eq, Show)
+
+data RuntimeRefreshTarget
+  = RefreshKeybinds
+  | RefreshMenu
+  | RefreshRc
+  | RefreshTheme
+  | RefreshSession
+  deriving (Eq, Show)
+
 data RuntimeCommand
   = CommandWorkspaceSwitch String
   | CommandWorkspaceRename String String
   | CommandWindow RuntimeWindowCommand Int
   | CommandPublishState RuntimeTopic [KeyValue]
+  | CommandColorSelect String Int
+  | CommandBackdropSelect Int String String
   | CommandStyleSet [KeyValue] Bool
   | CommandStyleApply
+  | CommandRefresh RuntimeRefreshTarget
+  | CommandPower RuntimePowerAction
+  | CommandFailsafe
+  | CommandLogout
   | CommandReload
   deriving (Eq, Show)
 
 data RuntimeRequest
   = RequestHello (Maybe String)
+  | RequestPublishStream RuntimeProducerRole [RuntimeTopic]
+  | RequestProducerState RuntimeTopic [KeyValue]
   | RequestSubscribe [RuntimeTopic]
   | RequestQuery RuntimeTopic
   | RequestCommand RuntimeCommand
@@ -84,6 +120,19 @@ data RuntimeStyleContext = RuntimeStyleContext
   , runtimeStyleSystemPath :: FilePath
   , runtimeStyleStateDir :: FilePath
   } deriving (Eq, Show)
+
+renderRuntimeProducerRole :: RuntimeProducerRole -> String
+renderRuntimeProducerRole producerRole =
+  case producerRole of
+    ProducerPager -> "pagerd"
+    ProducerToplevel -> "toplevel"
+
+parseRuntimeProducerRole :: String -> Maybe RuntimeProducerRole
+parseRuntimeProducerRole rawRole =
+  case map toLower rawRole of
+    "pagerd" -> Just ProducerPager
+    "toplevel" -> Just ProducerToplevel
+    _ -> Nothing
 
 renderRuntimeTopic :: RuntimeTopic -> String
 renderRuntimeTopic topic =
@@ -133,4 +182,23 @@ parseRuntimeWindowCommand rawCommand =
     "minimize" -> Just WindowMinimize
     "restore" -> Just WindowRestore
     "maximize" -> Just WindowMaximize
+    _ -> Nothing
+
+renderRuntimeRefreshTarget :: RuntimeRefreshTarget -> String
+renderRuntimeRefreshTarget refreshTarget =
+  case refreshTarget of
+    RefreshKeybinds -> "keybinds"
+    RefreshMenu -> "menu"
+    RefreshRc -> "rc"
+    RefreshTheme -> "theme"
+    RefreshSession -> "session"
+
+parseRuntimeRefreshTarget :: String -> Maybe RuntimeRefreshTarget
+parseRuntimeRefreshTarget rawTarget =
+  case map toLower rawTarget of
+    "keybinds" -> Just RefreshKeybinds
+    "menu" -> Just RefreshMenu
+    "rc" -> Just RefreshRc
+    "theme" -> Just RefreshTheme
+    "session" -> Just RefreshSession
     _ -> Nothing

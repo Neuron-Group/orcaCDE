@@ -7,7 +7,6 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
-#include <poll.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -17,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -76,11 +76,14 @@ static bool environment_has_backdrop_values(void);
 static bool parse_env_value(const char *contents, const char *key, char *dest,
 	size_t dest_size);
 static bool query_runtime_backdrops(char **out_contents);
+static bool query_runtime_backdrops_with_retry(char **out_contents);
 static bool setup_runtime_subscription(void);
 static void teardown_runtime_subscription(void);
 static void handle_runtime_frame(const struct nscde_runtime_frame *frame,
 	void *userdata);
 static void handle_runtime_subscription(void);
+static void handle_runtime_fd_ready(int fd, short revents, void *userdata);
+static void handle_runtime_fd_error(int fd, short revents, void *userdata);
 static void refresh_output_targets(void);
 static void restart_backdrop_processes(void);
 static void setup_signal_handlers(void);
@@ -675,6 +678,25 @@ query_runtime_backdrops(char **out_contents)
 }
 
 static bool
+query_runtime_backdrops_with_retry(char **out_contents)
+{
+	struct timespec retry_delay = {
+		.tv_sec = 0,
+		.tv_nsec = 100 * 1000 * 1000,
+	};
+	int attempt;
+
+	for (attempt = 0; attempt < 50; attempt++) {
+		if (query_runtime_backdrops(out_contents)) {
+			return true;
+		}
+		nanosleep(&retry_delay, NULL);
+	}
+
+	return false;
+}
+
+static bool
 setup_runtime_subscription(void)
 {
 	if (backdropd.runtime_active) {
@@ -733,12 +755,31 @@ handle_runtime_subscription(void)
 	}
 }
 
+static void
+handle_runtime_fd_ready(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	handle_runtime_subscription();
+}
+
+static void
+handle_runtime_fd_error(int fd, short revents, void *userdata)
+{
+	(void)fd;
+	(void)revents;
+	(void)userdata;
+	fprintf(stderr,
+		"nscde_backdropd: runtime subscription disconnected\n");
+	backdropd.running = false;
+}
+
 int
 main(int argc, char **argv)
 {
 	char *initial_contents = NULL;
-	struct pollfd pfd;
-	int poll_result;
+	nscde_fd_reactor reactor;
 
 	if (argc > 2 || (argc == 2 && strcmp(argv[1], "--once") != 0)) {
 		fprintf(stderr, "Usage: nscde_backdropd [--once]\n");
@@ -753,6 +794,7 @@ main(int argc, char **argv)
 	build_paths();
 	ensure_directories();
 	clear_output_targets();
+	nscde_fd_reactor_init(&reactor);
 	nscde_runtime_subscription_init(&backdropd.runtime_subscription);
 
 	if (backdropd.once_mode) {
@@ -760,7 +802,7 @@ main(int argc, char **argv)
 			apply_backdrop_environment();
 			return 0;
 		}
-		if (!query_runtime_backdrops(&initial_contents)) {
+		if (!query_runtime_backdrops_with_retry(&initial_contents)) {
 			fprintf(stderr, "nscde_backdropd: unable to query runtime backdrops topic\n");
 			return 1;
 		}
@@ -769,7 +811,7 @@ main(int argc, char **argv)
 		return 0;
 	}
 
-	if (query_runtime_backdrops(&initial_contents)) {
+	if (query_runtime_backdrops_with_retry(&initial_contents)) {
 		apply_backdrop_contents(initial_contents);
 		free(initial_contents);
 	} else {
@@ -785,24 +827,17 @@ main(int argc, char **argv)
 			return 1;
 		}
 
-		pfd.fd = backdropd.runtime_subscription.fd;
-		pfd.events = POLLIN;
-		pfd.revents = 0;
-		poll_result = poll(&pfd, 1, -1);
-		if (poll_result < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			fprintf(stderr, "nscde_backdropd: poll failed: %s\n",
-				strerror(errno));
+		nscde_fd_reactor_remove(&reactor, backdropd.runtime_subscription.fd);
+		if (!nscde_fd_reactor_add(&reactor,
+			backdropd.runtime_subscription.fd, POLLIN,
+			handle_runtime_fd_ready, handle_runtime_fd_error, NULL)) {
+			fprintf(stderr,
+				"nscde_backdropd: unable to register runtime watcher\n");
 			break;
 		}
-		if (pfd.revents & POLLIN) {
-			handle_runtime_subscription();
-		}
-		if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) {
-			fprintf(stderr,
-				"nscde_backdropd: runtime subscription disconnected\n");
+		if (!nscde_fd_reactor_run_once(&reactor, -1) && errno != EINTR) {
+			fprintf(stderr, "nscde_backdropd: event wait failed: %s\n",
+				strerror(errno));
 			break;
 		}
 	}

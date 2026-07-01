@@ -111,6 +111,10 @@ testMenuRendering =
               ])
     assertBool "style manager item present" ("Style Manager" `containsSubstring` menuXml)
     assertBool "workspace item present" ("Workspace Alpha" `containsSubstring` menuXml)
+    assertBool "workspace action uses runtime control path"
+      ("nscde-runtime ctl workspace-switch" `containsSubstring` menuXml)
+    assertBool "workspace action still performs compositor desktop switch"
+      ("GoToDesktop" `containsSubstring` menuXml)
 
 testKeybindRendering :: Test
 testKeybindRendering =
@@ -281,7 +285,8 @@ testBackdropCandidates :: Test
 testBackdropCandidates =
   TestCase $
     assertEqual "tiled backdrop search order"
-      [ "/tmp/home/.NsCDE/backer/Desk1-Example.pm"
+      [ "/tmp/home/.NsCDE/backer/Desk1-Example.png"
+      , "/tmp/home/.NsCDE/backer/Desk1-Example.pm"
       , "/tmp/home/.NsCDE/backdrops/Example.pm"
       , "/tmp/assets/backdrops/Example.pm"
       ]
