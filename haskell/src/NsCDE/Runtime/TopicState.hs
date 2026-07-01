@@ -1,6 +1,7 @@
 module NsCDE.Runtime.TopicState
   ( changedStyleTopics
   , changedWorkspaceTopics
+  , canonicalWorkspaceNames
   , deriveTaskEntries
   , initialWindowsEntries
   , lookupEntry
@@ -73,6 +74,12 @@ normalizeWorkspaceEntries entries =
   let parsedEntries = parseEnvContents (renderEnvFile entries)
   in if null parsedEntries then [] else parsedEntries
 
+canonicalWorkspaceNames :: [String] -> [KeyValue] -> [String]
+canonicalWorkspaceNames fallbackNames entries =
+  let publishedNames = publishedWorkspaceNames entries
+      mergedNames = appendMissing fallbackNames publishedNames
+  in if null mergedNames then fallbackNames else mergedNames
+
 publishedWorkspaceNames :: [KeyValue] -> [String]
 publishedWorkspaceNames entries =
   case splitCommaList (lookupEntry "NSCDE_WORKSPACES" "" entries) of
@@ -100,6 +107,10 @@ firstNonEmpty [] = ""
 firstNonEmpty (candidate:rest)
   | null candidate = firstNonEmpty rest
   | otherwise = candidate
+
+appendMissing :: Eq a => [a] -> [a] -> [a]
+appendMissing base extras =
+  base ++ filter (`notElem` base) extras
 
 lookupEntry :: String -> String -> [KeyValue] -> String
 lookupEntry _ fallback [] = fallback

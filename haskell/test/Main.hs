@@ -52,6 +52,7 @@ import NsCDE.Policy.Keymap (buildBindingIntent, renderBindingIntent)
 import NsCDE.Policy.Menu (buildMenuModel)
 import NsCDE.Policy.PanelLayout (emitPanelLayout)
 import NsCDE.Policy.SessionPlan (buildRcConfig)
+import qualified NsCDE.Runtime.TopicState as RuntimeTopicState
 
 main :: IO ()
 main = do
@@ -78,6 +79,7 @@ tests =
     , TestLabel "default backdrop plan" testDefaultBackdropPlan
     , TestLabel "keymap translation" testKeymapTranslation
     , TestLabel "keymap mixed context rejected" testKeymapMixedContextRejected
+    , TestLabel "workspace publish keeps canonical order" testWorkspacePublishKeepsCanonicalOrder
     ]
 
 testAppMenuParsing :: Test
@@ -370,6 +372,24 @@ testKeymapMixedContextRejected =
     assertEqual "mixed FVWM contexts are not accepted as labwc keybind contexts"
       Nothing
       (buildBindingIntent keymapEnv parsedBinding)
+
+testWorkspacePublishKeepsCanonicalOrder :: Test
+testWorkspacePublishKeepsCanonicalOrder =
+  TestCase $ do
+    let canonical = ["One", "Two", "Three", "Four"]
+        publishedEntries =
+          [ ("NSCDE_WORKSPACES", "Four,Three,Two,One")
+          , ("NSCDE_CURRENT_WORKSPACE", "Four")
+          ]
+    assertEqual "producer publish does not reorder canonical workspaces"
+      canonical
+      (RuntimeTopicState.canonicalWorkspaceNames canonical publishedEntries)
+    assertEqual "published current workspace is still accepted when it exists canonically"
+      "Four"
+      (RuntimeTopicState.resolvePublishedCurrentWorkspace
+        publishedEntries
+        canonical
+        "One")
 
 samplePanelProfile :: StaticPanelProfile
 samplePanelProfile =

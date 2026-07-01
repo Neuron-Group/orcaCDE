@@ -247,12 +247,7 @@ def write_fifo_command(path, command_line):
 
 
 def runtime_workspace_switch(workspace_name):
-    runtime_success = runtime_ctl("workspace-switch", workspace_name)
-    switch_success = write_fifo_command(
-        pager_fifo_path(),
-        "switch_workspace:{}".format(workspace_name),
-    )
-    return runtime_success, switch_success
+    return runtime_ctl("workspace-switch", workspace_name)
 
 
 def query_state(topic):

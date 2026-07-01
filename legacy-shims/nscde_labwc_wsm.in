@@ -119,19 +119,10 @@ def build_stylesheet(pal):
     )
 
 def send_workspace_switch(workspace_name):
-    runtime_success, switch_success = runtime_client.runtime_workspace_switch(
-        workspace_name
-    )
-    if runtime_success and switch_success:
+    if runtime_client.runtime_workspace_switch(workspace_name):
         return
-    if not runtime_success:
-        raise runtime_client.RuntimeUnavailableError(
-            "Unable to update workspace '{}' via the runtime daemon.".format(
-                workspace_name
-            )
-        )
     raise runtime_client.RuntimeUnavailableError(
-        "Unable to switch workspace '{}' via the compositor bridge.".format(
+        "Unable to switch workspace '{}' via the runtime daemon.".format(
             workspace_name
         )
     )

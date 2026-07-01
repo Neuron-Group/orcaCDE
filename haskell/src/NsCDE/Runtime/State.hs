@@ -223,16 +223,17 @@ handleRuntimeCommand command runtimeState =
   case command of
     CommandWorkspaceSwitch workspaceName ->
       if workspaceName `elem` runtimeWorkspaces runtimeState
-        then do
-          let updatedState = runtimeState {runtimeCurrentWorkspace = workspaceName}
-          syncedState <- refreshBackdropEntries updatedState
-          pure $
-            RuntimeTransition
-              { runtimeTransitionState = syncedState
-              , runtimeTransitionTopics = RuntimeTopicState.changedWorkspaceTopics
-              , runtimeTransitionEffects = []
-              , runtimeTransitionMessage = "workspace updated"
-              }
+        then pure $
+          RuntimeTransition
+            { runtimeTransitionState = runtimeState
+            , runtimeTransitionTopics = []
+            , runtimeTransitionEffects =
+                [ RuntimeEffectCompatCommand
+                    (runtimePagerFifo (runtimePaths runtimeState))
+                    ("switch_workspace:" ++ workspaceName)
+                ]
+            , runtimeTransitionMessage = "workspace switch requested"
+            }
         else pure (unchangedTransition runtimeState "workspace not found")
     CommandWorkspaceRename oldWorkspace newWorkspace ->
       if null newWorkspace || oldWorkspace == newWorkspace || oldWorkspace `notElem` runtimeWorkspaces runtimeState
@@ -414,7 +415,7 @@ fallbackCommand env command =
   let paths = resolveRuntimePaths env
   in case command of
        CommandWorkspaceSwitch workspaceName ->
-         writeCompatCommand (runtimeCommandFifo paths) ("switch_workspace:" ++ workspaceName)
+         writeCompatCommand (runtimePagerFifo paths) ("switch_workspace:" ++ workspaceName)
        CommandWorkspaceRename oldWorkspace newWorkspace ->
          writeCompatCommand (runtimeCommandFifo paths) ("rename_workspace:" ++ oldWorkspace ++ ":" ++ newWorkspace)
        CommandReload ->
@@ -684,11 +685,10 @@ lookupBackdropValue key ((candidateKey, value):rest)
 publishWorkspaceLikeState :: [KeyValue] -> RuntimeState -> IO RuntimeTransition
 publishWorkspaceLikeState entries runtimeState = do
   let normalizedEntries = RuntimeTopicState.normalizeWorkspaceEntries entries
-      publishedWorkspaces = RuntimeTopicState.publishedWorkspaceNames normalizedEntries
       resolvedWorkspaces =
-        if null publishedWorkspaces
-          then runtimeWorkspaces runtimeState
-          else publishedWorkspaces
+        RuntimeTopicState.canonicalWorkspaceNames
+          (runtimeWorkspaces runtimeState)
+          normalizedEntries
       resolvedCurrent =
         RuntimeTopicState.resolvePublishedCurrentWorkspace
           normalizedEntries

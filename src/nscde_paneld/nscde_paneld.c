@@ -285,7 +285,6 @@ static struct {
 	char left_label[MAX_NAME_LEN];
 	char right_label[MAX_NAME_LEN * 2];
 
-	char pager_fifo_path[PATH_MAX_LEN];
 	struct nscde_runtime_subscription runtime_subscription;
 	bool runtime_active;
 	int timer_fd;
@@ -739,10 +738,6 @@ parse_workspaces_env_contents(const char *contents)
 			strncpy(panel.current_workspace, val,
 				sizeof(panel.current_workspace) - 1);
 			panel.current_workspace[sizeof(panel.current_workspace) - 1] = '\0';
-		} else if (strcmp(key, "NSCDE_PAGER_COMMAND_FIFO") == 0) {
-			strncpy(panel.pager_fifo_path, val,
-				sizeof(panel.pager_fifo_path) - 1);
-			panel.pager_fifo_path[sizeof(panel.pager_fifo_path) - 1] = '\0';
 		} else if (strcmp(key, "NSCDE_WORKSPACES") == 0) {
 			panel.workspace_count = 0;
 			char tmp[STATE_LINE_LEN];
@@ -3798,30 +3793,9 @@ send_workspace_switch(const char *name)
 {
 	if (!nscde_runtime_ctl_workspace_switch(name)) {
 		fprintf(stderr,
-			"nscde_paneld: runtime workspace update failed for '%s'\n",
+			"nscde_paneld: runtime workspace switch failed for '%s'\n",
 			name);
 	}
-	if (!panel.pager_fifo_path[0]) {
-		fprintf(stderr,
-			"nscde_paneld: pager fifo unavailable for workspace '%s'\n",
-			name);
-		return;
-	}
-	int fd = open(panel.pager_fifo_path, O_WRONLY | O_NONBLOCK);
-	if (fd < 0) {
-		fprintf(stderr,
-			"nscde_paneld: unable to open pager fifo for workspace '%s'\n",
-			name);
-		return;
-	}
-	char cmd[MAX_NAME_LEN + 32];
-	int len = snprintf(cmd, sizeof(cmd), "switch_workspace:%s\n", name);
-	if (write(fd, cmd, len) < 0) {
-		fprintf(stderr,
-			"nscde_paneld: unable to write pager fifo for workspace '%s'\n",
-			name);
-	}
-	close(fd);
 }
 
 static void

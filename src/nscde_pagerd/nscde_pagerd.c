@@ -136,7 +136,6 @@ remove_workspace(struct ext_workspace_handle_v1 *handle)
 	for (int i = 0; i < pager.workspace_count; i++) {
 		if (pager.workspaces[i].handle == handle) {
 			pager.workspaces[i].valid = false;
-			/* Shift remaining workspaces */
 			for (int j = i; j < pager.workspace_count - 1; j++) {
 				pager.workspaces[j] = pager.workspaces[j + 1];
 			}
@@ -165,16 +164,13 @@ write_workspace_names(FILE *stream, const char *key)
 static int
 current_workspace_index(void)
 {
-	int current_index = 0;
-
 	for (int i = 0; i < pager.workspace_count; i++) {
 		if (pager.workspaces[i].valid &&
 		    strcmp(pager.workspaces[i].name, pager.current_workspace) == 0) {
-			current_index = i + 1;
-			break;
+			return i + 1;
 		}
 	}
-	return current_index;
+	return 0;
 }
 
 static void
@@ -630,7 +626,7 @@ ensure_command_fifo(void)
 	return 0;
 }
 
-/* Open session FIFO for reading (non-blocking) */
+/* Open pager command FIFO without hangup churn when writers disconnect. */
 static int
 open_session_fifo(void)
 {
@@ -640,8 +636,12 @@ open_session_fifo(void)
 		return -1;
 	}
 
-	/* Open FIFO in non-blocking mode */
-	fd = open(pager.pager_fifo_path, O_RDONLY | O_NONBLOCK);
+	/*
+	 * Keep a writer reference open in-process so short-lived external
+	 * writers do not trigger POLLHUP and tear down pagerd after the first
+	 * workspace-switch request.
+	 */
+	fd = open(pager.pager_fifo_path, O_RDWR | O_NONBLOCK);
 	if (fd < 0) {
 		fprintf(stderr, "nscde_pagerd: cannot open FIFO %s: %s\n",
 		    pager.pager_fifo_path, strerror(errno));
