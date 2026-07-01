@@ -77,6 +77,10 @@ Current verified bootstrap status:
   - `nscde_labwc_theme` is now a compatibility wrapper; the launcher and
     daemon-owned style-apply path publish the `labwc` theme directly from
     `nscde-runtime`
+  - some live workspace actions still cross this boundary intentionally:
+    runtime `ctl workspace-switch` updates normalized state/backdrop first,
+    then the UI entrypoint uses the existing pager or `GoToDesktop` bridge for
+    the final compositor workspace move
 - `doc/`
   - standalone-split notes and asset provenance
 - `tools/sync-from-nscde.sh`

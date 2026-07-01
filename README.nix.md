@@ -102,6 +102,10 @@ Concrete seams removed so far:
 - `themerc` generation is now owned by `nscde-runtime`; the launcher and
   daemon-owned style apply path both use the runtime publisher and
   `nscde_labwc_theme` remains only as a compatibility wrapper
+- workspace switching is now intentionally split across the runtime boundary:
+  `nscde-runtime ctl workspace-switch` owns the normalized workspace/backdrop
+  state update, while the calling UI still performs the final compositor
+  workspace move through the existing pager or `GoToDesktop` bridge
 - session coordination is now owned by `nscde-runtime daemon`; the packaged
   launcher autostart starts the runtime daemon directly and
   `legacy-shims/nscde_sessiond` remains only as a compatibility wrapper

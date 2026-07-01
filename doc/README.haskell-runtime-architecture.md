@@ -227,9 +227,14 @@ The current compatibility shim boundary is:
   `nscde_labwc_sysaction`, `nscde_labwc_sysinfo`, `nscde_labwc_fontmgr`,
   `nscde_labwc_windowmgr`
   - now runtime-first clients with socket `query` / `subscribe`
-  - `nscde_labwc_wsm` now also treats runtime `ctl` as the required live
-    command path and fails loudly instead of silently falling back to FIFO
-    control writes when the runtime is unavailable
+  - workspace selection now uses a two-step contract shared with the native
+    panel and generated menu actions: runtime `ctl workspace-switch` updates
+    normalized workspace/backdrop state first, then the entrypoint performs
+    the compositor-facing workspace move through the existing compatibility
+    pager bridge or `GoToDesktop` action
+  - `nscde_labwc_wsm` now shares that contract through the runtime client
+    helper and fails loudly when either the runtime update or the compositor
+    bridge is unavailable
   - `nscde_labwc_iconbox` now does the same for restore, maximize, and close:
     live window actions go through runtime `ctl`, and command failure is
     surfaced instead of silently falling back to the compatibility toplevel
@@ -287,6 +292,17 @@ The current live-read preference is now:
 That means `windows.env`, `workspaces.env`, `pager.env`, `panel.env`,
 `panel-layout.env`, and `backdrops.env` remain important outputs, but they are
 no longer the intended owner-facing live API for newly refactored clients.
+
+The current live-write preference is now:
+
+- runtime socket `ctl`
+  - owner-facing semantic state updates such as palette, backdrop, workspace,
+    logout, reload, and power requests
+- compositor-native actions at the entrypoint edge
+  - final `GoToDesktop` or pager activation step when a request needs both
+    runtime semantic state change and an immediate compositor workspace move
+- env files and FIFOs
+  - compatibility bridges only, not the intended owner-facing command surface
 
 ## Runtime clarity checkpoint
 

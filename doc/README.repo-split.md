@@ -112,6 +112,10 @@ Current limitation:
 - keybind generation has now moved with it: the standalone launcher prefers
   `nscde-runtime labwc-keybinds publish`, and `nscde_labwc_keybindgen` remains
   only as a compatibility wrapper
+- workspace/backdrop switching semantics are now split deliberately: the
+  runtime owns normalized workspace/backdrop state updates, while UI
+  entrypoints still perform the final compositor-facing workspace move through
+  the existing pager or `GoToDesktop` bridge
 
 Current remaining runtime-clarity backlog:
 
