@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # Compatibility wrapper for the Haskell runtime daemon.

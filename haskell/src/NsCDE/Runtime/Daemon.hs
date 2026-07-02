@@ -70,14 +70,21 @@ data ProducerStreamStop
 data ServerState = ServerState
   { serverRuntimeState :: RuntimeState
   , serverNextSubscriberId :: Int
+  , serverNextEventSeq :: Integer
   , serverSubscribers :: [Subscriber]
   }
 
 data Subscriber = Subscriber
   { subscriberId :: Int
   , subscriberTopics :: [RuntimeTopic]
+  , subscriberMode :: SubscriberMode
   , subscriberQueue :: Chan RuntimeResponse
   }
+
+data SubscriberMode
+  = SubscriberSnapshots
+  | SubscriberEvents Bool
+  deriving (Eq, Show)
 
 runDaemon :: IO ()
 runDaemon = do
@@ -90,7 +97,7 @@ runDaemon = do
   cleanupSocket (runtimeSocketFile (runtimePaths runtimeState))
   withSocketsDo $
     bracketSocket (runtimeSocketFile (runtimePaths runtimeState)) $ \serverSocket -> do
-      stateVar <- newMVar (ServerState runtimeState 1 [])
+      stateVar <- newMVar (ServerState runtimeState 1 1 [])
       void (forkIO (fifoLoop stateVar))
       forever $ do
         (clientSocket, _) <- accept serverSocket
@@ -149,8 +156,9 @@ runSubscribe requestedTopics =
             hSetBuffering handle LineBuffering
             writeFrame
               handle
-              [ ("TYPE", "subscribe")
+              [ ("TYPE", "subscribe-events")
               , ("TOPICS", intercalate "," (map renderRuntimeTopic topics))
+              , ("BOOTSTRAP", "1")
               ]
             streamSubscription handle)
           (\_ -> failWith "runtime daemon subscribe path is unavailable")
@@ -171,7 +179,9 @@ handleClient stateVar clientSocket = do
         RequestPublishStream producerRole topics ->
           handleProducerStream stateVar handle producerRole topics
         RequestSubscribe topics ->
-          handleSubscription stateVar handle topics
+          handleSubscription stateVar handle topics SubscriberSnapshots
+        RequestSubscribeEvents topics bootstrap ->
+          handleSubscription stateVar handle topics (SubscriberEvents bootstrap)
         _ -> do
           response <- handleRequest stateVar request
           writeFrame handle (encodeResponse response)
@@ -188,29 +198,41 @@ handleRequest stateVar request =
       pure (ResponseError "producer state frames must use the persistent publish-stream path")
     RequestSubscribe _ ->
       pure (ResponseError "subscribe requests must use the persistent socket path")
+    RequestSubscribeEvents _ _ ->
+      pure (ResponseError "subscribe-events requests must use the persistent socket path")
     RequestQuery topic -> do
       serverState <- readMVar stateVar
       ResponseState topic <$> queryTopicEntries (serverRuntimeState serverState) topic
     RequestCommand command -> do
-      transition <- modifyMVar stateVar $ \serverState -> do
+      (transition, eventFrames) <- modifyMVar stateVar $ \serverState -> do
         transition <- handleRuntimeCommand command (serverRuntimeState serverState)
+        let (nextSeq, frames) =
+              realizeTransitionEvents
+                (serverNextEventSeq serverState)
+                (SourceCommand command)
+                transition
         writeCompatibilityOutputs (runtimeTransitionState transition)
         pure
-          ( serverState {serverRuntimeState = runtimeTransitionState transition}
-          , transition
+          ( serverState
+              { serverRuntimeState = runtimeTransitionState transition
+              , serverNextEventSeq = nextSeq
+              }
+          , (transition, frames)
           )
       effectResult <- try (performRuntimeTransitionEffects transition)
       broadcastTopics stateVar (runtimeTransitionTopics transition)
+      broadcastEventFrames stateVar eventFrames
       case effectResult of
-        Right message ->
+        Right (message, effectStatuses) -> do
+          broadcastEffectStatusEvents stateVar effectStatuses
           pure (ResponseAck message)
         Left err ->
           pure
             (ResponseError
               ("runtime transition failed: " ++ displayException (err :: SomeException)))
 
-handleSubscription :: MVar ServerState -> Handle -> [RuntimeTopic] -> IO ()
-handleSubscription stateVar handle requestedTopics =
+handleSubscription :: MVar ServerState -> Handle -> [RuntimeTopic] -> SubscriberMode -> IO ()
+handleSubscription stateVar handle requestedTopics mode =
   if null topics
     then do
       writeFrame handle (encodeResponse (ResponseError "subscribe requires at least one topic"))
@@ -219,7 +241,7 @@ handleSubscription stateVar handle requestedTopics =
       queue <- newChan
       subscriberKey <- modifyMVar stateVar $ \serverState -> do
         let nextKey = serverNextSubscriberId serverState
-            subscriber = Subscriber nextKey topics queue
+            subscriber = Subscriber nextKey topics mode queue
         pure
           ( serverState
               { serverNextSubscriberId = nextKey + 1
@@ -230,7 +252,7 @@ handleSubscription stateVar handle requestedTopics =
       catchIOError
         (do
           serverState <- readMVar stateVar
-          sendInitialState handle topics (serverRuntimeState serverState)
+          sendInitialState handle topics mode (serverRuntimeState serverState)
           forever $ do
             response <- readChan queue
             writeFrame handle (encodeResponse response))
@@ -265,8 +287,10 @@ handleProducerStream stateVar handle producerRole requestedTopics =
               case decodeRequest requestFrame of
                 Right (RequestProducerState topic entries)
                   | topic `elem` topics -> do
-                      changedTopics <- applyProducerState stateVar producerRole topic entries
+                      (changedTopics, eventFrames) <-
+                        applyProducerState stateVar producerRole topic entries
                       broadcastTopics stateVar changedTopics
+                      broadcastEventFrames stateVar eventFrames
                 Right (RequestProducerState _ _) -> do
                   writeFrame handle (encodeResponse (ResponseError "producer stream topic not owned by role"))
                   hFlush handle
@@ -284,23 +308,45 @@ producerTopicsValid :: RuntimeProducerRole -> [RuntimeTopic] -> Bool
 producerTopicsValid producerRole topics =
   not (null topics) && all (`elem` producerTopicsAllowed producerRole) topics
 
-applyProducerState :: MVar ServerState -> RuntimeProducerRole -> RuntimeTopic -> [KeyValue] -> IO [RuntimeTopic]
+applyProducerState
+  :: MVar ServerState
+  -> RuntimeProducerRole
+  -> RuntimeTopic
+  -> [KeyValue]
+  -> IO ([RuntimeTopic], [(RuntimeTopic, RuntimeResponse)])
 applyProducerState stateVar producerRole topic entries =
   modifyMVar stateVar $ \serverState -> do
     transition <- publishProducerState producerRole topic entries (serverRuntimeState serverState)
+    let (nextSeq, frames) =
+          realizeTransitionEvents
+            (serverNextEventSeq serverState)
+            (SourceProducer producerRole)
+            transition
     writeCompatibilityOutputs (runtimeTransitionState transition)
     pure
-      ( serverState {serverRuntimeState = runtimeTransitionState transition}
-      , runtimeTransitionTopics transition
+      ( serverState
+          { serverRuntimeState = runtimeTransitionState transition
+          , serverNextEventSeq = nextSeq
+          }
+      , (runtimeTransitionTopics transition, frames)
       )
 
-sendInitialState :: Handle -> [RuntimeTopic] -> RuntimeState -> IO ()
-sendInitialState handle topics runtimeState =
-  mapM_
-    (\topic -> do
-      entries <- queryTopicEntries runtimeState topic
-      writeFrame handle (encodeResponse (ResponseState topic entries)))
-    topics
+sendInitialState :: Handle -> [RuntimeTopic] -> SubscriberMode -> RuntimeState -> IO ()
+sendInitialState handle topics mode runtimeState =
+  case mode of
+    SubscriberSnapshots ->
+      mapM_
+        (\topic -> do
+          entries <- queryTopicEntries runtimeState topic
+          writeFrame handle (encodeResponse (ResponseState topic entries)))
+        topics
+    SubscriberEvents bootstrapEnabled ->
+      when bootstrapEnabled $
+        mapM_
+          (\topic -> do
+            entries <- queryTopicEntries runtimeState topic
+            writeFrame handle (encodeResponse (ResponseSnapshot topic entries)))
+          topics
 
 removeSubscriber :: MVar ServerState -> Int -> IO ()
 removeSubscriber stateVar subscriberKey =
@@ -321,19 +367,47 @@ broadcastTopics stateVar changedTopics =
   where
     topics = uniqueTopics changedTopics
 
+broadcastEventFrames :: MVar ServerState -> [(RuntimeTopic, RuntimeResponse)] -> IO ()
+broadcastEventFrames stateVar eventFrames =
+  when (not (null eventFrames)) $ do
+    serverState <- readMVar stateVar
+    mapM_ (broadcastEventFrame (serverSubscribers serverState)) eventFrames
+
+broadcastEventFrame :: [Subscriber] -> (RuntimeTopic, RuntimeResponse) -> IO ()
+broadcastEventFrame subscribers (topic, response) =
+  mapM_
+    (\subscriber ->
+      when (subscriberWantsEvents topic subscriber) $
+        writeChan (subscriberQueue subscriber) response)
+    subscribers
+
 broadcastTopic :: RuntimeState -> [Subscriber] -> RuntimeTopic -> IO ()
 broadcastTopic runtimeState subscribers topic = do
   entries <- queryTopicEntries runtimeState topic
   let response = ResponseState topic entries
   mapM_
     (\subscriber ->
-      when (subscriberWantsTopic topic subscriber) $
+      when (subscriberWantsSnapshots topic subscriber) $
         writeChan (subscriberQueue subscriber) response)
     subscribers
 
 subscriberWantsTopic :: RuntimeTopic -> Subscriber -> Bool
 subscriberWantsTopic topic subscriber =
   any (== topic) (subscriberTopics subscriber)
+
+subscriberWantsSnapshots :: RuntimeTopic -> Subscriber -> Bool
+subscriberWantsSnapshots topic subscriber =
+  subscriberWantsTopic topic subscriber &&
+    case subscriberMode subscriber of
+      SubscriberSnapshots -> True
+      SubscriberEvents _ -> False
+
+subscriberWantsEvents :: RuntimeTopic -> Subscriber -> Bool
+subscriberWantsEvents topic subscriber =
+  subscriberWantsTopic topic subscriber &&
+    case subscriberMode subscriber of
+      SubscriberSnapshots -> False
+      SubscriberEvents _ -> True
 
 uniqueTopics :: [RuntimeTopic] -> [RuntimeTopic]
 uniqueTopics =
@@ -375,15 +449,25 @@ fifoLoop stateVar = do
 
 applyCompatLine :: MVar ServerState -> String -> IO ()
 applyCompatLine stateVar rawLine = do
-  transition <- modifyMVar stateVar $ \serverState -> do
+  (transition, eventFrames) <- modifyMVar stateVar $ \serverState -> do
     transition <- handleCompatCommandLine rawLine (serverRuntimeState serverState)
+    let (nextSeq, frames) =
+          realizeTransitionEvents
+            (serverNextEventSeq serverState)
+            SourceCompatFifo
+            transition
     writeCompatibilityOutputs (runtimeTransitionState transition)
     pure
-      ( serverState {serverRuntimeState = runtimeTransitionState transition}
-      , transition
+      ( serverState
+          { serverRuntimeState = runtimeTransitionState transition
+          , serverNextEventSeq = nextSeq
+          }
+      , (transition, frames)
       )
-  _ <- performRuntimeTransitionEffects transition
+  (_, effectStatuses) <- performRuntimeTransitionEffects transition
   broadcastTopics stateVar (runtimeTransitionTopics transition)
+  broadcastEventFrames stateVar eventFrames
+  broadcastEffectStatusEvents stateVar effectStatuses
 
 requestServer :: RuntimePaths -> [KeyValue] -> IO (Maybe [KeyValue])
 requestServer paths requestFrame =
@@ -408,6 +492,12 @@ decodeServerResponse frame =
       case parseRuntimeTopic (lookupValueDefault "TOPIC" "" frame) of
         Just topic -> Right (ResponseState topic (stripMeta frame))
         Nothing -> Left "unsupported state topic"
+    Just "snapshot" ->
+      case parseRuntimeTopic (lookupValueDefault "TOPIC" "" frame) of
+        Just topic -> Right (ResponseSnapshot topic (stripMeta frame))
+        Nothing -> Left "unsupported snapshot topic"
+    Just "event" ->
+      decodeEventResponse frame
     _ -> Left "unsupported response type"
 
 commandFrame :: RuntimeCommand -> [KeyValue]
@@ -521,7 +611,14 @@ extractLines leftover chunk =
 
 stripMeta :: [KeyValue] -> [KeyValue]
 stripMeta =
-  filter (\(key, _) -> key /= "TYPE" && key /= "TOPIC")
+  filter (\(key, _) ->
+    key /= "TYPE"
+      && key /= "TOPIC"
+      && key /= "SEQ"
+      && key /= "EVENT"
+      && key /= "SOURCE"
+      && key /= "RESET"
+      && key /= "UNSET")
 
 lookupValue :: String -> [KeyValue] -> Maybe String
 lookupValue _ [] = Nothing
@@ -564,3 +661,131 @@ streamSubscription handle =
           putStr (renderFrame frame)
           hFlush stdout
           loop
+
+realizeTransitionEvents
+  :: Integer
+  -> RuntimeEventSource
+  -> RuntimeTransition
+  -> (Integer, [(RuntimeTopic, RuntimeResponse)])
+realizeTransitionEvents startSeq eventSource transition =
+  foldl buildFrame (startSeq, []) (runtimeTransitionEventDeltas transition)
+  where
+    buildFrame (nextSeq, frames) eventDelta =
+      let event =
+            RuntimeEvent
+              { runtimeEventSeq = nextSeq
+              , runtimeEventTopic = runtimeEventDeltaTopic eventDelta
+              , runtimeEventKind = runtimeEventDeltaKind eventDelta
+              , runtimeEventSource = eventSource
+              , runtimeEventReset = runtimeEventDeltaReset eventDelta
+              , runtimeEventUnsetKeys = runtimeEventDeltaUnsetKeys eventDelta
+              }
+      in
+        ( nextSeq + 1
+        , frames ++
+            [ ( runtimeEventDeltaTopic eventDelta
+              , ResponseEvent event (runtimeEventDeltaEntries eventDelta)
+              )
+            ]
+        )
+
+decodeEventResponse :: [KeyValue] -> Either String RuntimeResponse
+decodeEventResponse frame =
+  case ( parseRuntimeTopic (lookupValueDefault "TOPIC" "" frame)
+       , parseRuntimeEventKind (lookupValueDefault "EVENT" "" frame)
+       , reads (lookupValueDefault "SEQ" "" frame)
+       ) of
+    (Just topic, Just eventKind, [(seqValue, "")]) ->
+      Right
+        (ResponseEvent
+          RuntimeEvent
+            { runtimeEventSeq = seqValue
+            , runtimeEventTopic = topic
+            , runtimeEventKind = eventKind
+            , runtimeEventSource = parseEventSource (lookupValueDefault "SOURCE" "" frame)
+            , runtimeEventReset = lookupValueDefault "RESET" "0" frame == "1"
+            , runtimeEventUnsetKeys = parseCommaList (lookupValueDefault "UNSET" "" frame)
+            }
+          (stripMeta frame))
+    _ ->
+      Left "unsupported event frame"
+
+broadcastEffectStatusEvents :: MVar ServerState -> [RuntimeEffectStatus] -> IO ()
+broadcastEffectStatusEvents stateVar effectStatuses =
+  when (not (null failedStatuses)) $ do
+    frames <- modifyMVar stateVar $ \serverState -> do
+      let (nextSeq, nextFrames) =
+            realizeEffectStatusEvents
+              (serverNextEventSeq serverState)
+              failedStatuses
+      pure
+        ( serverState { serverNextEventSeq = nextSeq }
+        , nextFrames
+        )
+    broadcastEventFrames stateVar frames
+  where
+    failedStatuses = filter (not . runtimeEffectSucceeded) effectStatuses
+
+realizeEffectStatusEvents
+  :: Integer
+  -> [RuntimeEffectStatus]
+  -> (Integer, [(RuntimeTopic, RuntimeResponse)])
+realizeEffectStatusEvents startSeq =
+  foldl buildFrame (startSeq, [])
+  where
+    buildFrame (nextSeq, frames) effectStatus =
+      let event =
+            RuntimeEvent
+              { runtimeEventSeq = nextSeq
+              , runtimeEventTopic = TopicSession
+              , runtimeEventKind = EventBackendActionFailed
+              , runtimeEventSource = SourceEffect
+              , runtimeEventReset = False
+              , runtimeEventUnsetKeys = []
+              }
+          response =
+            ResponseEvent event
+              [ ("EFFECT", renderEffectName (runtimeEffectValue effectStatus)) ]
+      in (nextSeq + 1, frames ++ [(TopicSession, response)])
+
+renderEffectName :: RuntimeEffect -> String
+renderEffectName effect =
+  case effect of
+    RuntimeEffectCompatCommand _ _ -> "compat-command"
+    RuntimeEffectApplyResolvedStyle _ -> "apply-resolved-style"
+    RuntimeEffectRefreshLabwc _ -> "refresh-labwc"
+    RuntimeEffectPower _ -> "power"
+    RuntimeEffectFailsafeTerminal -> "failsafe-terminal"
+    RuntimeEffectLogoutBackend -> "logout-backend"
+    RuntimeEffectReloadBackend -> "reload-backend"
+
+parseEventSource :: String -> RuntimeEventSource
+parseEventSource rawSource =
+  case rawSource of
+    "startup" -> SourceStartup
+    "compat-fifo" -> SourceCompatFifo
+    "effect" -> SourceEffect
+    _ ->
+      case splitOnFirst ':' rawSource of
+        Just ("producer", "pagerd") -> SourceProducer ProducerPager
+        Just ("producer", "toplevel") -> SourceProducer ProducerToplevel
+        _ -> SourceEffect
+
+parseCommaList :: String -> [String]
+parseCommaList "" = []
+parseCommaList rawText =
+  filter (not . null) (splitComma rawText)
+
+splitComma :: String -> [String]
+splitComma [] = [""]
+splitComma (',':rest) = "" : splitComma rest
+splitComma (char:rest) =
+  case splitComma rest of
+    [] -> [[char]]
+    token:tokens -> (char : token) : tokens
+
+splitOnFirst :: Char -> String -> Maybe (String, String)
+splitOnFirst delimiter rawText =
+  case break (== delimiter) rawText of
+    (_, "") -> Nothing
+    (left, _ : right) -> Just (left, right)

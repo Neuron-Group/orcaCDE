@@ -46,60 +46,6 @@ def state_path(name):
     return os.path.join(state_dir(), name)
 
 
-def panel_env_path():
-    return state_path("panel.env")
-
-
-def style_env_path():
-    return state_path("style.env")
-
-
-def workspaces_env_path():
-    return state_path("workspaces.env")
-
-
-def windows_env_path():
-    return state_path("windows.env")
-
-
-def pager_env_path():
-    return state_path("pager.env")
-
-
-def session_fifo_path():
-    return state_path("sessiond.fifo")
-
-
-def pager_fifo_path():
-    state = parse_env_file(workspaces_env_path())
-    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    state = parse_env_file(pager_env_path())
-    fifo = state.get("NSCDE_PAGER_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    return state_path("pagerd.fifo")
-
-
-def toplevel_fifo_path():
-    state = query_state("windows")
-    fifo = state.get("NSCDE_TASK_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    fifo = state.get("NSCDE_TASKD_COMMAND_FIFO", "")
-    if fifo:
-        return fifo
-    return state_path("topleveld.fifo")
-
-
-def parse_env_file(path):
-    if not os.path.exists(path):
-        return {}
-    with open(path, "r", encoding="utf-8") as handle:
-        return parse_env_contents(handle.read())
-
-
 def parse_env_contents(contents):
     data = {}
     for line in contents.splitlines():
@@ -231,21 +177,6 @@ def runtime_backdrop_select(desk_number, mode, image_name):
     return response.get("TYPE", "") == "ack"
 
 
-def write_fifo_command(path, command_line):
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
-    except OSError:
-        return False
-
-    try:
-        os.write(fd, (command_line + "\n").encode("utf-8"))
-        return True
-    except OSError:
-        return False
-    finally:
-        os.close(fd)
-
-
 def runtime_workspace_switch(workspace_name):
     return runtime_ctl("workspace-switch", workspace_name)
 
@@ -292,8 +223,9 @@ def runtime_subscribe_socket(topics):
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     client.connect(runtime_socket_path())
     client.sendall(render_env_frame({
-        "TYPE": "subscribe",
+        "TYPE": "subscribe-events",
         "TOPICS": ",".join(topic_list),
+        "BOOTSTRAP": "1",
     }).encode("utf-8"))
     client.setblocking(False)
     return client
@@ -416,19 +348,30 @@ class RuntimeSubscription(object):
         for handler in self._frame_handlers:
             handler(frame_type, topic, dict(payload))
 
-        if frame_type != "state" or not topic:
-            if frame_type == "error":
-                self._teardown_socket()
-                if not self._closed:
-                    self._handle_runtime_failure(
-                        RuntimeDisconnectedError(
-                            "Runtime subscription error for '{}': {}".format(
-                                ",".join(self._topics),
-                                frame.get("MESSAGE", "unknown error"),
-                            )
+        if frame_type == "error":
+            self._teardown_socket()
+            if not self._closed:
+                self._handle_runtime_failure(
+                    RuntimeDisconnectedError(
+                        "Runtime subscription error for '{}': {}".format(
+                            ",".join(self._topics),
+                            frame.get("MESSAGE", "unknown error"),
                         )
                     )
+                )
             return
+
+        if not topic or frame_type not in ("state", "snapshot", "event"):
+            return
+
+        if frame_type == "event":
+            merged = {}
+            if frame.get("RESET", "0") != "1":
+                merged.update(self._cache.get(topic, {}))
+            for key in split_topic_list(frame.get("UNSET", "")):
+                merged.pop(key, None)
+            merged.update(payload)
+            payload = merged
 
         self._cache[topic] = dict(payload)
         for handler in self._topic_handlers.get(topic, []):
@@ -462,7 +405,16 @@ def strip_meta(entries):
     return {
         key: value
         for key, value in entries.items()
-        if key not in ("TYPE", "TOPIC", "MESSAGE")
+        if key not in (
+            "TYPE",
+            "TOPIC",
+            "MESSAGE",
+            "SEQ",
+            "EVENT",
+            "SOURCE",
+            "RESET",
+            "UNSET",
+        )
     }
 
 

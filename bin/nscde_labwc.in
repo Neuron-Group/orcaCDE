@@ -120,107 +120,41 @@ startup_log()
    printf '%s %s\n' "$(date '+%Y-%m-%d %H:%M:%S.%3N' 2>/dev/null)" "$*" >> "$NSCDE_LABWC_STARTUP_LOG"
 }
 
-publish_session_files_fallback()
+require_runtime_bin()
 {
-   startup_log "session-files:fallback:start"
-   cat > "$NSCDE_LABWC_CONFIG_DIR/autostart" <<EOF
-#!/bin/sh
-export NSCDE_BACKEND=labwc
-export NSCDE_ROOT="$NSCDE_ROOT"
-export NSCDE_TOOLSDIR="$NSCDE_TOOLSDIR"
-export NSCDE_DATADIR="$NSCDE_DATADIR"
-export FVWM_USERDIR="$FVWM_USERDIR"
-export NSCDE_LABWC_THEME_NAME="$NSCDE_THEME_NAME"
-export NSCDE_LABWC_WORKSPACES="$NSCDE_WORKSPACES"
-export NSCDE_LABWC_CURRENT_WORKSPACE="$NSCDE_CURRENT_WORKSPACE"
-export NSCDE_LABWC_AUTOSTART_TERMINAL="$NSCDE_LABWC_AUTOSTART_TERMINAL"
-export NSCDE_LABWC_TERMINAL="$_labwc_terminal"
-export NSCDE_STATE_DIR="$NSCDE_STATE_DIR"
-export NSCDE_COMMAND_FIFO="$NSCDE_COMMAND_FIFO"
-export NSCDE_PALETTE_FILE="$NSCDE_PALETTE_FILE"
-export PATH="$NSCDE_ROOT/bin:\$PATH"
-export XDG_CURRENT_DESKTOP=NsCDE
-export XDG_SESSION_DESKTOP=NsCDE
-export DESKTOP_SESSION=NsCDE
-export XDG_SESSION_TYPE=wayland
-export NSCDE_PANEL_LAYOUT_EXTERNAL="${NSCDE_PANEL_LAYOUT_EXTERNAL:-0}"
-export NSCDE_RUNTIME_BIN="${NSCDE_RUNTIME_BIN:-nscde-runtime}"
-export NSCDE_STATIC_PANEL_LAYOUT_FILE="${NSCDE_STATIC_PANEL_LAYOUT_FILE:-}"
-export NSCDE_STATIC_SESSION_ENV_FILE="${NSCDE_STATIC_SESSION_ENV_FILE:-}"
-"$NSCDE_RUNTIME_BIN" daemon &
-"$NSCDE_TOOLSDIR/nscde_labwc_pagerd" &
-"$NSCDE_TOOLSDIR/nscde_labwc_toplevel" &
-"$NSCDE_TOOLSDIR/nscde_backdropd" &
-"$NSCDE_TOOLSDIR/nscde_labwc_paneld" &
-if [ "$NSCDE_LABWC_AUTOSTART_TERMINAL" = "1" ]; then
-"$_labwc_terminal" &
-fi
-EOF
-   chmod +x "$NSCDE_LABWC_CONFIG_DIR/autostart"
+   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
+      return 0
+   fi
 
-   cat > "$NSCDE_LABWC_CONFIG_DIR/environment" <<EOF
-NSCDE_BACKEND=labwc
-NSCDE_ROOT=@prefix@
-NSCDE_TOOLSDIR=@NSCDE_TOOLSDIR@
-NSCDE_DATADIR=@NSCDE_DATADIR@
-FVWM_USERDIR=${HOME}/.NsCDE
-NSCDE_PALETTE_FILE=${NSCDE_PALETTE_FILE:-}
-NSCDE_LABWC_THEME_NAME=$NSCDE_THEME_NAME
-NSCDE_LABWC_WORKSPACES=$NSCDE_WORKSPACES
-NSCDE_LABWC_CURRENT_WORKSPACE=$NSCDE_CURRENT_WORKSPACE
-NSCDE_LABWC_AUTOSTART_TERMINAL=${NSCDE_LABWC_AUTOSTART_TERMINAL:-1}
-NSCDE_LABWC_TERMINAL=$_labwc_terminal
-NSCDE_STATE_DIR=${NSCDE_STATE_DIR}
-NSCDE_COMMAND_FIFO=${NSCDE_COMMAND_FIFO}
-NSCDE_PANEL_LAYOUT_EXTERNAL=${NSCDE_PANEL_LAYOUT_EXTERNAL:-0}
-NSCDE_RUNTIME_BIN=${NSCDE_RUNTIME_BIN:-nscde-runtime}
-NSCDE_STATIC_PANEL_LAYOUT_FILE=${NSCDE_STATIC_PANEL_LAYOUT_FILE:-}
-NSCDE_STATIC_SESSION_ENV_FILE=${NSCDE_STATIC_SESSION_ENV_FILE:-}
-XDG_CURRENT_DESKTOP=NsCDE
-XDG_SESSION_DESKTOP=NsCDE
-DESKTOP_SESSION=NsCDE
-XDG_SESSION_TYPE=wayland
-XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME}/.config}
-XDG_CACHE_HOME=${XDG_CACHE_HOME:-${HOME}/.cache}
-XDG_DATA_HOME=${XDG_DATA_HOME:-${HOME}/.local/share}
-EOF
-
-   cat > "$NSCDE_LABWC_CONFIG_DIR/shutdown" <<EOF
-#!/bin/sh
-exit 0
-EOF
-   chmod +x "$NSCDE_LABWC_CONFIG_DIR/shutdown"
-   startup_log "session-files:fallback:done"
+   echo "nscde_labwc: runtime binary not found: $NSCDE_RUNTIME_BIN" >&2
+   startup_log "runtime:missing"
+   exit 127
 }
 
 publish_session_files()
 {
    startup_log "session-files:start"
-   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-      if "$NSCDE_RUNTIME_BIN" labwc-session publish "$NSCDE_LABWC_CONFIG_DIR"; then
-         chmod +x "$NSCDE_LABWC_CONFIG_DIR/autostart" "$NSCDE_LABWC_CONFIG_DIR/shutdown"
-         startup_log "session-files:runtime:done"
-         return 0
-      fi
-      startup_log "session-files:runtime:failed"
+   if "$NSCDE_RUNTIME_BIN" labwc-session publish "$NSCDE_LABWC_CONFIG_DIR"; then
+      chmod +x "$NSCDE_LABWC_CONFIG_DIR/autostart" "$NSCDE_LABWC_CONFIG_DIR/shutdown"
+      startup_log "session-files:runtime:done"
+      return 0
    fi
 
-   publish_session_files_fallback
+   startup_log "session-files:runtime:failed"
+   echo "nscde_labwc: unable to publish session files via runtime" >&2
+   return 1
 }
 
 publish_menu_xml()
 {
    startup_log "menugen:start"
-   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-      if "$NSCDE_RUNTIME_BIN" labwc-menu publish "$NSCDE_LABWC_CONFIG_DIR"; then
-         startup_log "menugen:runtime:done"
-         return 0
-      fi
-      startup_log "menugen:runtime:failed"
+   if "$NSCDE_RUNTIME_BIN" labwc-menu publish "$NSCDE_LABWC_CONFIG_DIR"; then
+      startup_log "menugen:runtime:done"
+      return 0
    fi
 
+   startup_log "menugen:runtime:failed"
    echo "nscde_labwc: unable to generate menu.xml" >&2
-   startup_log "menugen:missing"
    return 1
 }
 
@@ -229,152 +163,36 @@ publish_runtime_contracts()
    export NSCDE_PANEL_LAYOUT_EXTERNAL="${NSCDE_PANEL_LAYOUT_EXTERNAL:-0}"
    export NSCDE_RUNTIME_BIN="${NSCDE_RUNTIME_BIN:-nscde-runtime}"
 
-   if [ -n "${NSCDE_STATIC_PANEL_LAYOUT_FILE:-}" ] && [ -f "$NSCDE_STATIC_PANEL_LAYOUT_FILE" ]; then
-      if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-         startup_log "panel-layout-runtime:start"
-         nscde_state_ensure_dir
-         if "$NSCDE_RUNTIME_BIN" panel-layout publish "$NSCDE_STATIC_PANEL_LAYOUT_FILE" > "${NSCDE_PANEL_LAYOUT_FILE}.tmp"; then
-            mv "${NSCDE_PANEL_LAYOUT_FILE}.tmp" "$NSCDE_PANEL_LAYOUT_FILE"
-            export NSCDE_PANEL_LAYOUT_EXTERNAL=1
-            startup_log "panel-layout-runtime:done"
-            return 0
-         fi
-         rm -f "${NSCDE_PANEL_LAYOUT_FILE}.tmp"
-         startup_log "panel-layout-runtime:failed"
-      fi
+   if [ -z "${NSCDE_STATIC_PANEL_LAYOUT_FILE:-}" ] || [ ! -f "$NSCDE_STATIC_PANEL_LAYOUT_FILE" ]; then
+      return 0
    fi
-}
 
-prepare_workspace_xml_fallback()
-{
-   _labwc_workspace_names_xml=""
-   _labwc_workspace_count=0
-   _labwc_workspace_index=1
-
-   while IFS= read -r _labwc_workspace_name
-   do
-      _labwc_workspace_names_xml="${_labwc_workspace_names_xml}      <name>${_labwc_workspace_name}</name>
-"
-      _labwc_workspace_count=$_labwc_workspace_index
-      _labwc_workspace_index=$((_labwc_workspace_index + 1))
-   done <<EOF
-$(nscde_workspace_list)
-EOF
-
-   if [ "$_labwc_workspace_count" -eq 0 ]; then
-      _labwc_workspace_names_xml="      <name>One</name>
-      <name>Two</name>
-      <name>Three</name>
-      <name>Four</name>
-"
-      _labwc_workspace_count=4
+   startup_log "panel-layout-runtime:start"
+   nscde_state_ensure_dir
+   if "$NSCDE_RUNTIME_BIN" panel-layout publish "$NSCDE_STATIC_PANEL_LAYOUT_FILE" > "${NSCDE_PANEL_LAYOUT_FILE}.tmp"; then
+      mv "${NSCDE_PANEL_LAYOUT_FILE}.tmp" "$NSCDE_PANEL_LAYOUT_FILE"
+      export NSCDE_PANEL_LAYOUT_EXTERNAL=1
+      startup_log "panel-layout-runtime:done"
+      return 0
    fi
-}
 
-publish_rc_xml_fallback()
-{
-   prepare_workspace_xml_fallback
-
-   cat > "$NSCDE_LABWC_CONFIG_DIR/rc.xml" <<EOF
-<?xml version="1.0"?>
-<labwc_config>
-  <core>
-    <decoration>server</decoration>
-    <gap>0</gap>
-  </core>
-  <focus>
-    <followMouse>$_labwc_follow_mouse</followMouse>
-    <raiseOnFocus>$_labwc_raise_on_focus</raiseOnFocus>
-  </focus>
-  <theme>
-    <name>$NSCDE_THEME_NAME</name>
-    <cornerRadius>0</cornerRadius>
-    <titlebar>
-      <layout>menu:iconify,max</layout>
-    </titlebar>
-    <font place="ActiveWindow">
-      <name>$_labwc_title_font_name</name>
-      <size>$_labwc_title_font_size</size>
-      <slant>$_labwc_title_font_slant</slant>
-      <weight>$_labwc_title_font_weight</weight>
-    </font>
-    <font place="InactiveWindow">
-      <name>$_labwc_title_font_name</name>
-      <size>$_labwc_title_font_size</size>
-      <slant>$_labwc_title_font_slant</slant>
-      <weight>$_labwc_title_font_weight</weight>
-    </font>
-  </theme>
-  <desktops>
-    <number>$_labwc_workspace_count</number>
-    <names>
-$_labwc_workspace_names_xml    </names>
-  </desktops>
-$_keybind_xml
-  <mouse>
-    <default />
-    <doubleClickTime>500</doubleClickTime>
-    <context name="Root">
-      <mousebind button="Left" action="Press">
-        <action name="ShowMenu" menu="root-menu" />
-      </mousebind>
-      <mousebind button="Right" action="Press">
-        <action name="ShowMenu" menu="root-menu" />
-      </mousebind>
-      <mousebind direction="Up" action="Scroll">
-        <action name="GoToDesktop" to="left" wrap="yes" />
-      </mousebind>
-      <mousebind direction="Down" action="Scroll">
-        <action name="GoToDesktop" to="right" wrap="yes" />
-      </mousebind>
-    </context>
-    <context name="TitleBar">
-      <mousebind button="Left" action="Press">
-        <action name="Focus" />
-        <action name="Raise" />
-      </mousebind>
-      <mousebind button="Right" action="Click">
-        <action name="Focus" />
-        <action name="Raise" />
-        <action name="ShowMenu" menu="client-menu" />
-      </mousebind>
-      <mousebind direction="Up" action="Scroll">
-        <action name="Unshade" />
-        <action name="Focus" />
-      </mousebind>
-      <mousebind direction="Down" action="Scroll">
-        <action name="Shade" />
-      </mousebind>
-    </context>
-    <context name="Title">
-      <mousebind button="Left" action="Drag">
-        <action name="Move" />
-      </mousebind>
-      <mousebind button="Left" action="DoubleClick">
-        <action name="ToggleMaximize" />
-      </mousebind>
-      <mousebind button="Right" action="Click">
-        <action name="ShowMenu" menu="client-menu" />
-      </mousebind>
-    </context>
-  </mouse>
-</labwc_config>
-EOF
+   rm -f "${NSCDE_PANEL_LAYOUT_FILE}.tmp"
+   startup_log "panel-layout-runtime:failed"
+   echo "nscde_labwc: unable to publish panel layout contract via runtime" >&2
+   return 1
 }
 
 publish_rc_xml()
 {
    startup_log "rc.xml:start"
-   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-      if "$NSCDE_RUNTIME_BIN" labwc-rc publish "$NSCDE_LABWC_CONFIG_DIR"; then
-         startup_log "rc.xml:runtime:done"
-         return 0
-      fi
-      startup_log "rc.xml:runtime:failed"
+   if "$NSCDE_RUNTIME_BIN" labwc-rc publish "$NSCDE_LABWC_CONFIG_DIR"; then
+      startup_log "rc.xml:runtime:done"
+      return 0
    fi
 
-   publish_rc_xml_fallback
-   startup_log "rc.xml:fallback:done"
+   startup_log "rc.xml:runtime:failed"
+   echo "nscde_labwc: unable to generate rc.xml via runtime" >&2
+   return 1
 }
 
 resolve_title_font()
@@ -433,19 +251,17 @@ resolve_title_font()
 prepare_runtime()
 {
    startup_log "prepare:start"
-   publish_runtime_contracts
+   require_runtime_bin
+   publish_runtime_contracts || exit 1
 
    startup_log "keybindgen:start"
-   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-      if _keybind_xml=$("$NSCDE_RUNTIME_BIN" labwc-keybinds publish 2>/dev/null); then
-         startup_log "keybindgen:runtime:done"
-      else
-         _keybind_xml=""
-         startup_log "keybindgen:runtime:failed"
-      fi
-   elif [ -x "$NSCDE_TOOLSDIR/nscde_labwc_keybindgen" ]; then
-      _keybind_xml=$("$NSCDE_TOOLSDIR/nscde_labwc_keybindgen" 2>/dev/null) || true
-      startup_log "keybindgen:shim:done"
+   if _keybind_xml=$("$NSCDE_RUNTIME_BIN" labwc-keybinds publish 2>/dev/null); then
+      startup_log "keybindgen:runtime:done"
+   else
+      _keybind_xml=""
+      startup_log "keybindgen:runtime:failed"
+      echo "nscde_labwc: unable to publish keybind XML via runtime" >&2
+      exit 1
    fi
    _labwc_keybind_xml_file="${NSCDE_STATE_DIR}/labwc-keybinds.xml"
    if [ -n "$_keybind_xml" ]; then
@@ -458,17 +274,12 @@ prepare_runtime()
    startup_log "keybindgen:done"
 
    startup_log "theme:start"
-   if command -v "$NSCDE_RUNTIME_BIN" >/dev/null 2>&1; then
-      if "$NSCDE_RUNTIME_BIN" labwc-theme publish >/dev/null 2>&1; then
-         startup_log "theme:runtime:done"
-      else
-         startup_log "theme:runtime:failed"
-      fi
-   elif [ -x "$NSCDE_TOOLSDIR/nscde_labwc_theme" ]; then
-      "$NSCDE_TOOLSDIR/nscde_labwc_theme" >/dev/null 2>&1 || true
-      startup_log "theme:shim:done"
+   if "$NSCDE_RUNTIME_BIN" labwc-theme publish >/dev/null 2>&1; then
+      startup_log "theme:runtime:done"
    else
-      startup_log "theme:missing"
+      startup_log "theme:runtime:failed"
+      echo "nscde_labwc: unable to publish theme via runtime" >&2
+      exit 1
    fi
    startup_log "theme:done"
 
@@ -501,7 +312,7 @@ prepare_runtime()
 
    publish_menu_xml || exit 1
 
-   publish_session_files
+   publish_session_files || exit 1
    startup_log "prepare:done"
 }
 

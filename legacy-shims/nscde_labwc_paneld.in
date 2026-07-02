@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # NsCDE layer-shell panel daemon wrapper for labwc backend.

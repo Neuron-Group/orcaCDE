@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # NsCDE foreign toplevel daemon wrapper for labwc backend.

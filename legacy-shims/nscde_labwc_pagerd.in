@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # NsCDE workspace pager daemon wrapper for labwc backend.

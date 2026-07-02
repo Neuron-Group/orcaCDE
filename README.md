@@ -30,6 +30,16 @@ It now also has a local bootstrap build root:
   - runnable prepare-only verification for the packaged standalone launcher
     and session closure
 
+Current runtime ownership status also includes:
+
+- `nscde-runtime` now owns the canonical event-driven live state stream:
+  one-shot reads use `query`, compatibility streams keep legacy `subscribe`,
+  and the live owner-facing callback path uses `subscribe-events` with
+  bootstrap snapshots plus sequenced events
+- native `C` daemons such as `nscde_paneld` and `nscde_backdropd` now
+  bootstrap from runtime snapshots and stay current through callback-driven
+  topic updates instead of native steady-state polling loops
+
 Current verified bootstrap status:
 
 - `nix flake check path:/.../NsCDE-Wayland` passes

@@ -22,7 +22,6 @@ CONFIG_DIR="$WORK_DIR/labwc"
 STATE_DIR="$WORK_DIR/state"
 THEME_DIR="$WORK_DIR/home/.local/share/themes/NsCDE-Stage1/labwc"
 KEYBIND_FILE="$STATE_DIR/labwc-keybinds.xml"
-KEYBIND_SHIM_FILE="$WORK_DIR/labwc-keybinds-shim.xml"
 STYLE_FILE="$STATE_DIR/style.env"
 DAEMON_LOG="$WORK_DIR/runtime-daemon.log"
 DAEMON_PID=""
@@ -49,67 +48,6 @@ BOGUS_BACKDROP_FILE="$WORK_DIR/bogus-backdrop.pm"
 SWAYBG_LOG="$WORK_DIR/swaybg.log"
 FAKE_SWAYBG="$WORK_DIR/fake-swaybg"
 NO_RUNTIME_DIR="$WORK_DIR/no-runtime"
-
-normalize_keybind_xml() {
-   awk '
-      function trim(value) {
-         sub(/^[[:space:]]+/, "", value)
-         sub(/[[:space:]]+$/, "", value)
-         return value
-      }
-
-      BEGIN {
-         in_keybind = 0
-         body = ""
-      }
-
-      /<keybind key="/ {
-         in_keybind = 1
-         body = ""
-         if (match($0, /key="[^"]+"/)) {
-            key = substr($0, RSTART + 5, RLENGTH - 6)
-         } else {
-            key = ""
-         }
-         next
-      }
-
-      /<\/keybind>/ {
-         if (in_keybind) {
-            gsub(/&quot;/, "\"", body)
-            gsub(/[[:space:]]+/, " ", body)
-            body = trim(body)
-            print key "\t" body
-         }
-         in_keybind = 0
-         body = ""
-         next
-      }
-
-      {
-         if (in_keybind) {
-            line = trim($0)
-            if (line != "") {
-               body = body " " line
-            }
-         }
-      }
-   ' "$1" | sort
-}
-
-assert_keybind_parity() {
-   SHIM_NORM_FILE="$WORK_DIR/labwc-keybinds-shim.norm"
-   RUNTIME_NORM_FILE="$WORK_DIR/labwc-keybinds-runtime.norm"
-
-   normalize_keybind_xml "$KEYBIND_SHIM_FILE" > "$SHIM_NORM_FILE"
-   normalize_keybind_xml "$KEYBIND_FILE" > "$RUNTIME_NORM_FILE"
-
-   if ! diff -u "$SHIM_NORM_FILE" "$RUNTIME_NORM_FILE" >/dev/null; then
-      echo "runtime-check: runtime keybind publisher diverged from compatibility shim semantics" >&2
-      diff -u "$SHIM_NORM_FILE" "$RUNTIME_NORM_FILE" >&2 || true
-      exit 1
-   fi
-}
 
 cleanup() {
    terminate_pid "$BACKDROPD_PID"
@@ -170,16 +108,6 @@ NSCDE_TOOLSDIR="$TOOLS_DIR" \
 NSCDE_LABWC_TERMINAL="xterm" \
 NSCDE_STATE_DIR="$STATE_DIR" \
 "$RUNTIME_BIN" labwc-keybinds publish > "$KEYBIND_FILE"
-
-HOME="$WORK_DIR/home" \
-NSCDE_DATADIR="$ROOT_DIR/assets" \
-FVWM_USERDIR="$FVWM_USERDIR" \
-NSCDE_TOOLSDIR="$TOOLS_DIR" \
-NSCDE_LABWC_TERMINAL="xterm" \
-NSCDE_STATE_DIR="$STATE_DIR" \
-ksh "$ROOT_DIR/tools/nscde_labwc_keybindgen_legacy.ksh" > "$KEYBIND_SHIM_FILE"
-
-assert_keybind_parity
 
 HOME="$WORK_DIR/home" \
 NSCDE_DATADIR="$ROOT_DIR/assets" \
@@ -684,6 +612,5 @@ grep -q '^window.active.title.bg.color: #' "$THEME_DIR/themerc"
 printf '%s\n' "runtime-check: ok"
 printf '%s\n' "panel-layout=$PANEL_LAYOUT_FILE"
 printf '%s\n' "keybinds=$KEYBIND_FILE"
-printf '%s\n' "keybinds-shim=$KEYBIND_SHIM_FILE"
 printf '%s\n' "config-dir=$CONFIG_DIR"
 printf '%s\n' "state-dir=$STATE_DIR"

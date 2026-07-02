@@ -111,8 +111,14 @@ The top-level runtime shape should be:
 5. `nscde-runtime query ...`
    - stable read-side API for wrappers, tests, and native helper tooling
 6. `nscde-runtime subscribe ...`
-   - persistent socket stream for live state consumers
-   - primary event-driven read path for Qt clients and compatibility bridges
+   - compatibility socket stream for older long-lived consumers
+7. `nscde-runtime subscribe-events ...`
+   - canonical persistent socket stream for live state consumers
+   - primary event-driven read path for Qt clients, native `C` daemons, and
+     compatibility bridges
+   - bootstrap `snapshot` frames establish initial topic state
+   - sequenced `event` frames carry callback-driven deltas with `RESET` /
+     `UNSET` metadata for cache merge
 
 Within `ctl`, the runtime also now owns typed artifact refresh intents:
 
@@ -149,6 +155,9 @@ The current extracted runtime now owns these render-time paths directly:
 
 - `panel-layout.env`
   - static profile import plus env override resolution
+  - `StaticPanelProfile` remains the imported reference input
+  - `PanelLayoutState` is the canonical runtime-owned published view
+  - `PanelLayoutDelta` is the runtime delta shape for live callback updates
 - `menu.xml`
   - parsed `AppMenus.conf` import
   - semantic menu model
@@ -200,8 +209,15 @@ The current extracted runtime now owns these render-time paths directly:
   - publishes `session.env`, `panel.env`, `panel-layout.env`,
     `workspaces.env`, `pager.env`, `subpanels.env`, `capabilities`, and
     initial `windows.env` / `taskd.env`
-  - serves socket-based `ctl`, `query`, and `subscribe` requests and bridges
-    current FIFO compatibility commands for `pagerd` and `toplevel`
+  - serves socket-based `ctl`, `query`, legacy `subscribe`, and canonical
+    `subscribe-events` requests
+  - `subscribe-events` uses `TYPE=subscribe-events`, `TOPICS=...`, and
+    optional `BOOTSTRAP=1|0`
+  - emits `TYPE=snapshot` bootstrap frames and sequenced `TYPE=event` frames
+    with `SEQ`, `EVENT`, `SOURCE`, `RESET`, and `UNSET`
+  - surfaces backend action failures as `backend-action-failed` events on the
+    session topic instead of silently swallowing effect errors
+  - bridges current FIFO compatibility commands for `pagerd` and `toplevel`
 
 The packaged launcher now prefers `nscde-runtime` for:
 
@@ -226,7 +242,8 @@ The current compatibility shim boundary is:
   `nscde_labwc_backdropmgr`, `nscde_labwc_stylemgr`,
   `nscde_labwc_sysaction`, `nscde_labwc_sysinfo`, `nscde_labwc_fontmgr`,
   `nscde_labwc_windowmgr`
-  - now runtime-first clients with socket `query` / `subscribe`
+  - now runtime-first clients with socket `query` plus canonical
+    `subscribe-events`
   - workspace selection now uses a two-step contract shared with the native
     panel and generated menu actions: runtime `ctl workspace-switch` updates
     normalized workspace/backdrop state first, then the entrypoint performs
@@ -262,7 +279,8 @@ The current compatibility shim boundary is:
 
 Current verified handoff:
 
-- `nscde-runtime daemon`, `ctl`, `query`, and `subscribe` now pass the standalone
+- `nscde-runtime daemon`, `ctl`, `query`, legacy `subscribe`, and canonical
+  `subscribe-events` now pass the standalone
   `runtime-check`
 - the packaged launcher autostart now starts `nscde-runtime daemon`
 - `runtime-check`, `launcher-check`, and `nix flake check` cover this
@@ -276,16 +294,23 @@ Current verified handoff:
     regression that appeared when runtime backdrop planning stopped falling back
     to the legacy desk defaults
 - the steady-state live runtime path is now socket-first and event-driven:
-  long-lived Qt clients subscribe to runtime topics, `nscde_labwc_taskd`
-  no longer owns a live subscribe loop, and the native `C` daemons no longer use fixed
-  1-second polling loops for live state updates
+  long-lived clients bootstrap from runtime snapshots and then follow
+  sequenced runtime events, `nscde_labwc_taskd` no longer owns a live
+  subscribe loop, and the native `C` daemons no longer use fixed 1-second
+  polling loops for live state updates
 
 The current live-read preference is now:
 
-- runtime socket `subscribe`
-  - primary event-driven path for long-lived UI and bridge clients
 - runtime socket `query`
   - primary one-shot read path for tools and startup sync
+- runtime socket `subscribe-events`
+  - primary event-driven path for long-lived UI and bridge clients
+  - topic cache contract:
+    `snapshot` replaces cached topic state
+    `event` with `RESET=1` clears cached topic state before overlay
+    `UNSET` removes named keys from cached topic state
+- runtime socket `subscribe`
+  - compatibility streaming path retained during migration
 - env files and FIFOs
   - compatibility mirrors for legacy consumers and staged migration glue
 
@@ -310,7 +335,8 @@ The current runtime is already past the main polling-to-events transition.
 
 Implemented checkpoint:
 
-- steady-state live reads are socket-first through `query` and `subscribe`
+- steady-state live reads are socket-first through `query` and
+  `subscribe-events`
 - long-lived Qt tools consume runtime callbacks instead of file polling
 - shell task-list publication is driven from runtime subscriptions instead of
   a `sleep 1` loop
@@ -719,8 +745,8 @@ owners.
 Desired relationship:
 
 - `nscde_paneld`
-  - now uses runtime socket query/subscribe for `panel`, `panel-layout`,
-    `workspaces`, and `subpanels`
+  - now uses runtime socket `query` plus canonical `subscribe-events` for
+    `panel`, `panel-layout`, `workspaces`, and `subpanels`
   - keeps `panel.env`, `panel-layout.env`, and `subpanels.env` only as
     compatibility outputs for transitional consumers
   - renders and sends commands

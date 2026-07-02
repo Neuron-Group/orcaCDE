@@ -1,6 +1,11 @@
 module NsCDE.Domain.PanelLayout
   ( StaticPanelProfile(..)
+  , PanelLayoutDelta(..)
+  , PanelLayoutState(..)
+  , panelLayoutStateEntries
   ) where
+
+import NsCDE.Foundation.EnvFile (KeyValue)
 
 data StaticPanelProfile = StaticPanelProfile
   { panelHeight :: Int
@@ -65,3 +70,17 @@ data StaticPanelProfile = StaticPanelProfile
   , panelAppletLoadWidth :: Int
   , panelAppletLoadHeight :: Int
   } deriving (Eq, Show)
+
+data PanelLayoutState = PanelLayoutState
+  { panelLayoutProfile :: StaticPanelProfile
+  , panelLayoutEntries :: [KeyValue]
+  } deriving (Eq, Show)
+
+data PanelLayoutDelta = PanelLayoutDelta
+  { panelLayoutDeltaEntries :: [KeyValue]
+  , panelLayoutDeltaUnsetKeys :: [String]
+  , panelLayoutDeltaReset :: Bool
+  } deriving (Eq, Show)
+
+panelLayoutStateEntries :: PanelLayoutState -> [KeyValue]
+panelLayoutStateEntries = panelLayoutEntries

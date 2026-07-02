@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # NsCDE runtime-owned backdrop daemon wrapper for the labwc backend.

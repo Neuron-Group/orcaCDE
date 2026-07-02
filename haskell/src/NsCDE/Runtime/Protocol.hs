@@ -51,6 +51,10 @@ decodeRequest frame =
     "subscribe" ->
       let topics = mapMaybe parseRuntimeTopic (splitCommaList (lookupText frame "TOPICS" ""))
       in Right (RequestSubscribe topics)
+    "subscribe-events" ->
+      let topics = mapMaybe parseRuntimeTopic (splitCommaList (lookupText frame "TOPICS" ""))
+          bootstrap = lookupText frame "BOOTSTRAP" "1" /= "0"
+      in Right (RequestSubscribeEvents topics bootstrap)
     "state" ->
       case parseRuntimeTopic (lookupText frame "TOPIC" "") of
         Just topic -> Right (RequestProducerState topic (publishStateEntries frame))
@@ -70,6 +74,19 @@ encodeResponse response =
     ResponseState topic entries ->
       [ ("TYPE", "state")
       , ("TOPIC", renderRuntimeTopic topic)
+      ] ++ entries
+    ResponseSnapshot topic entries ->
+      [ ("TYPE", "snapshot")
+      , ("TOPIC", renderRuntimeTopic topic)
+      ] ++ entries
+    ResponseEvent event entries ->
+      [ ("TYPE", "event")
+      , ("TOPIC", renderRuntimeTopic (runtimeEventTopic event))
+      , ("SEQ", show (runtimeEventSeq event))
+      , ("EVENT", renderRuntimeEventKind (runtimeEventKind event))
+      , ("SOURCE", renderRuntimeEventSource (runtimeEventSource event))
+      , ("RESET", if runtimeEventReset event then "1" else "0")
+      , ("UNSET", intercalateComma (runtimeEventUnsetKeys event))
       ] ++ entries
     ResponseAck message ->
       [ ("TYPE", "ack")
@@ -197,3 +214,8 @@ isPrefixOf [] _ = True
 isPrefixOf _ [] = False
 isPrefixOf (left:leftRest) (right:rightRest) =
   left == right && isPrefixOf leftRest rightRest
+
+intercalateComma :: [String] -> String
+intercalateComma [] = ""
+intercalateComma [value] = value
+intercalateComma (value:rest) = value ++ "," ++ intercalateComma rest

@@ -2,9 +2,11 @@ module NsCDE.Runtime.State
   ( RuntimeState(..)
   , RuntimeTransition
   , RuntimeEffect(..)
+  , RuntimeEffectStatus(..)
   , performRuntimeTransitionEffects
   , producerTopicsAllowed
   , publishProducerState
+  , runtimeTransitionEventDeltas
   , runtimeTransitionMessage
   , runtimeTransitionState
   , runtimeTransitionTopics
@@ -29,6 +31,7 @@ import System.Posix.IO (OpenFileFlags(..), OpenMode(..), closeFd, defaultFileFla
 import System.Posix.Types (FileMode)
 
 import NsCDE.Domain.Runtime
+import NsCDE.Domain.PanelLayout (panelLayoutStateEntries)
 import NsCDE.Domain.Backdrop
   ( BackdropPlan(..)
   , BackdropSelection(..)
@@ -51,7 +54,7 @@ import NsCDE.Policy.Backdrop (buildBackdropPlan, renderBackdropEntries)
 import qualified NsCDE.Policy.StyleApply as StyleApply
 import NsCDE.Parse.Subpanels (loadSubpanels, renderSubpanelsEnv)
 import NsCDE.Parse.PaletteDp (resolvePalettePath)
-import NsCDE.Policy.PanelLayout (emitPanelLayout, loadStaticPanelProfile)
+import NsCDE.Policy.PanelLayout (buildPanelLayoutState, loadStaticPanelProfile)
 import qualified NsCDE.Runtime.Backend as RuntimeBackend
 import qualified NsCDE.Runtime.Labwc as RuntimeLabwc
 import qualified NsCDE.Runtime.TopicState as RuntimeTopicState
@@ -67,9 +70,15 @@ data RuntimeEffect
   | RuntimeEffectLogoutBackend
   | RuntimeEffectReloadBackend
 
+data RuntimeEffectStatus = RuntimeEffectStatus
+  { runtimeEffectSucceeded :: Bool
+  , runtimeEffectValue :: RuntimeEffect
+  }
+
 data RuntimeTransition = RuntimeTransition
   { runtimeTransitionState :: RuntimeState
   , runtimeTransitionTopics :: [RuntimeTopic]
+  , runtimeTransitionEventDeltas :: [RuntimeEventDelta]
   , runtimeTransitionEffects :: [RuntimeEffect]
   , runtimeTransitionMessage :: String
   }
@@ -223,17 +232,28 @@ handleRuntimeCommand command runtimeState =
   case command of
     CommandWorkspaceSwitch workspaceName ->
       if workspaceName `elem` runtimeWorkspaces runtimeState
-        then pure $
-          RuntimeTransition
-            { runtimeTransitionState = runtimeState
-            , runtimeTransitionTopics = []
-            , runtimeTransitionEffects =
-                [ RuntimeEffectCompatCommand
-                    (runtimePagerFifo (runtimePaths runtimeState))
-                    ("switch_workspace:" ++ workspaceName)
-                ]
-            , runtimeTransitionMessage = "workspace switch requested"
-            }
+        then do
+          let updatedState =
+                runtimeState
+                  { runtimeCurrentWorkspace = workspaceName
+                  }
+          syncedState <- refreshBackdropEntries updatedState
+          eventDeltas <-
+            buildResetEventDeltas
+              syncedState
+              RuntimeTopicState.changedWorkspaceTopics
+          pure $
+            RuntimeTransition
+              { runtimeTransitionState = syncedState
+              , runtimeTransitionTopics = RuntimeTopicState.changedWorkspaceTopics
+              , runtimeTransitionEventDeltas = eventDeltas
+              , runtimeTransitionEffects =
+                  [ RuntimeEffectCompatCommand
+                      (runtimePagerFifo (runtimePaths syncedState))
+                      ("switch_workspace:" ++ workspaceName)
+                  ]
+              , runtimeTransitionMessage = "workspace switch requested"
+              }
         else pure (unchangedTransition runtimeState "workspace not found")
     CommandWorkspaceRename oldWorkspace newWorkspace ->
       if null newWorkspace || oldWorkspace == newWorkspace || oldWorkspace `notElem` runtimeWorkspaces runtimeState
@@ -250,10 +270,15 @@ handleRuntimeCommand command runtimeState =
                   , runtimeCurrentWorkspace = renamedCurrent
                   }
           syncedState <- refreshBackdropEntries updatedState
+          eventDeltas <-
+            buildResetEventDeltas
+              syncedState
+              RuntimeTopicState.changedWorkspaceTopics
           pure $
             RuntimeTransition
               { runtimeTransitionState = syncedState
               , runtimeTransitionTopics = RuntimeTopicState.changedWorkspaceTopics
+              , runtimeTransitionEventDeltas = eventDeltas
               , runtimeTransitionEffects =
                   [ RuntimeEffectCompatCommand
                       (runtimeCommandFifo (runtimePaths syncedState))
@@ -266,6 +291,7 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = []
+          , runtimeTransitionEventDeltas = []
           , runtimeTransitionEffects =
               [ RuntimeEffectCompatCommand
                   (runtimeToplevelFifo (runtimePaths runtimeState))
@@ -286,21 +312,24 @@ handleRuntimeCommand command runtimeState =
           (runtimePaletteFallbackFile runtimeState)
           styleUpdates
       updatedState <- refreshBackdropEntries (updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle)
+      let changedTopics =
+            RuntimeTopicState.changedStyleTopics
+              (runtimeFpVariant runtimeState)
+              (runtimeFpVariant updatedState)
+              (runtimePaletteEntries runtimeState)
+              (runtimePaletteEntries updatedState)
+              (runtimeBackdropEntries runtimeState)
+              (runtimeBackdropEntries updatedState)
+              (runtimeCurrentWorkspace runtimeState)
+              (runtimeCurrentWorkspace updatedState)
+              (runtimeStyleState runtimeState)
+              (runtimeStyleState updatedState)
+      eventDeltas <- buildResetEventDeltas updatedState changedTopics
       pure
         RuntimeTransition
           { runtimeTransitionState = updatedState
-          , runtimeTransitionTopics =
-            RuntimeTopicState.changedStyleTopics
-                (runtimeFpVariant runtimeState)
-                (runtimeFpVariant updatedState)
-                (runtimePaletteEntries runtimeState)
-                (runtimePaletteEntries updatedState)
-                (runtimeBackdropEntries runtimeState)
-                (runtimeBackdropEntries updatedState)
-                (runtimeCurrentWorkspace runtimeState)
-                (runtimeCurrentWorkspace updatedState)
-                (runtimeStyleState runtimeState)
-                (runtimeStyleState updatedState)
+          , runtimeTransitionTopics = changedTopics
+          , runtimeTransitionEventDeltas = eventDeltas
           , runtimeTransitionEffects =
               [ RuntimeEffectApplyResolvedStyle resolvedStyle
               | applyNow
@@ -317,21 +346,24 @@ handleRuntimeCommand command runtimeState =
             updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle
       _ <- materializeActiveBackdrop styleUpdatedState
       updatedState <- refreshBackdropEntries styleUpdatedState
+      let changedTopics =
+            RuntimeTopicState.changedStyleTopics
+              (runtimeFpVariant runtimeState)
+              (runtimeFpVariant updatedState)
+              (runtimePaletteEntries runtimeState)
+              (runtimePaletteEntries updatedState)
+              (runtimeBackdropEntries runtimeState)
+              (runtimeBackdropEntries updatedState)
+              (runtimeCurrentWorkspace runtimeState)
+              (runtimeCurrentWorkspace updatedState)
+              (runtimeStyleState runtimeState)
+              (runtimeStyleState updatedState)
+      eventDeltas <- buildResetEventDeltas updatedState changedTopics
       pure
         RuntimeTransition
           { runtimeTransitionState = updatedState
-          , runtimeTransitionTopics =
-            RuntimeTopicState.changedStyleTopics
-                (runtimeFpVariant runtimeState)
-                (runtimeFpVariant updatedState)
-                (runtimePaletteEntries runtimeState)
-                (runtimePaletteEntries updatedState)
-                (runtimeBackdropEntries runtimeState)
-                (runtimeBackdropEntries updatedState)
-                (runtimeCurrentWorkspace runtimeState)
-                (runtimeCurrentWorkspace updatedState)
-                (runtimeStyleState runtimeState)
-                (runtimeStyleState updatedState)
+          , runtimeTransitionTopics = changedTopics
+          , runtimeTransitionEventDeltas = eventDeltas
           , runtimeTransitionEffects = [RuntimeEffectApplyResolvedStyle resolvedStyle]
           , runtimeTransitionMessage = "style applied"
           }
@@ -340,6 +372,7 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = refreshTopics refreshTarget
+          , runtimeTransitionEventDeltas = [artifactRefreshEvent refreshTarget]
           , runtimeTransitionEffects =
               [ RuntimeEffectRefreshLabwc [refreshTarget] ]
           , runtimeTransitionMessage =
@@ -350,6 +383,8 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = reloadTopics
+          , runtimeTransitionEventDeltas =
+              map artifactRefreshEvent reloadRefreshTargets
           , runtimeTransitionEffects =
               [ RuntimeEffectRefreshLabwc reloadRefreshTargets
               , RuntimeEffectReloadBackend
@@ -361,6 +396,7 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = []
+          , runtimeTransitionEventDeltas = []
           , runtimeTransitionEffects = [RuntimeEffectLogoutBackend]
           , runtimeTransitionMessage = "logout requested"
           }
@@ -369,6 +405,7 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = []
+          , runtimeTransitionEventDeltas = []
           , runtimeTransitionEffects = [RuntimeEffectFailsafeTerminal]
           , runtimeTransitionMessage = "failsafe terminal requested"
           }
@@ -377,6 +414,7 @@ handleRuntimeCommand command runtimeState =
         RuntimeTransition
           { runtimeTransitionState = runtimeState
           , runtimeTransitionTopics = []
+          , runtimeTransitionEventDeltas = []
           , runtimeTransitionEffects = [RuntimeEffectPower powerAction]
           , runtimeTransitionMessage = "power action requested"
           }
@@ -553,6 +591,7 @@ unchangedTransition runtimeState message =
   RuntimeTransition
     { runtimeTransitionState = runtimeState
     , runtimeTransitionTopics = []
+    , runtimeTransitionEventDeltas = []
     , runtimeTransitionEffects = []
     , runtimeTransitionMessage = message
     }
@@ -569,10 +608,13 @@ publishRuntimeState topic entries runtimeState =
                   (runtimeToplevelFifo (runtimePaths runtimeState))
                   normalizedEntries
             }
+      eventDeltas <-
+        buildResetEventDeltas updatedState [TopicWindows, TopicTaskd]
       pure $
         RuntimeTransition
           { runtimeTransitionState = updatedState
           , runtimeTransitionTopics = [TopicWindows, TopicTaskd]
+          , runtimeTransitionEventDeltas = eventDeltas
           , runtimeTransitionEffects = []
           , runtimeTransitionMessage = "state published"
           }
@@ -700,10 +742,15 @@ publishWorkspaceLikeState entries runtimeState = do
           , runtimeCurrentWorkspace = resolvedCurrent
           }
   syncedState <- refreshBackdropEntries updatedState
+  eventDeltas <-
+    buildResetEventDeltas
+      syncedState
+      RuntimeTopicState.changedWorkspaceTopics
   pure $
     RuntimeTransition
       { runtimeTransitionState = syncedState
       , runtimeTransitionTopics = RuntimeTopicState.changedWorkspaceTopics
+      , runtimeTransitionEventDeltas = eventDeltas
       , runtimeTransitionEffects = []
       , runtimeTransitionMessage = "state published"
       }
@@ -736,21 +783,24 @@ handleColorSelect paletteName colorCount runtimeState
           updatedState <-
             refreshBackdropEntries
               (updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle)
+          let changedTopics =
+                RuntimeTopicState.changedStyleTopics
+                  (runtimeFpVariant runtimeState)
+                  (runtimeFpVariant updatedState)
+                  (runtimePaletteEntries runtimeState)
+                  (runtimePaletteEntries updatedState)
+                  (runtimeBackdropEntries runtimeState)
+                  (runtimeBackdropEntries updatedState)
+                  (runtimeCurrentWorkspace runtimeState)
+                  (runtimeCurrentWorkspace updatedState)
+                  (runtimeStyleState runtimeState)
+                  (runtimeStyleState updatedState)
+          eventDeltas <- buildResetEventDeltas updatedState changedTopics
           pure
             RuntimeTransition
               { runtimeTransitionState = updatedState
-              , runtimeTransitionTopics =
-                  RuntimeTopicState.changedStyleTopics
-                    (runtimeFpVariant runtimeState)
-                    (runtimeFpVariant updatedState)
-                    (runtimePaletteEntries runtimeState)
-                    (runtimePaletteEntries updatedState)
-                    (runtimeBackdropEntries runtimeState)
-                    (runtimeBackdropEntries updatedState)
-                    (runtimeCurrentWorkspace runtimeState)
-                    (runtimeCurrentWorkspace updatedState)
-                    (runtimeStyleState runtimeState)
-                    (runtimeStyleState updatedState)
+              , runtimeTransitionTopics = changedTopics
+              , runtimeTransitionEventDeltas = eventDeltas
               , runtimeTransitionEffects =
                   [ RuntimeEffectApplyResolvedStyle resolvedStyle ]
               , runtimeTransitionMessage = "palette updated and applied"
@@ -774,21 +824,24 @@ handleBackdropSelect deskNumber modeText imageName runtimeState
             updateRuntimeStateFromResolvedStyle runtimeState resolvedStyle
       materialized <- materializeCurrentBackdropForDesk deskNumber styleUpdatedState
       updatedState <- refreshBackdropEntries styleUpdatedState
+      let changedTopics =
+            RuntimeTopicState.changedStyleTopics
+              (runtimeFpVariant runtimeState)
+              (runtimeFpVariant updatedState)
+              (runtimePaletteEntries runtimeState)
+              (runtimePaletteEntries updatedState)
+              (runtimeBackdropEntries runtimeState)
+              (runtimeBackdropEntries updatedState)
+              (runtimeCurrentWorkspace runtimeState)
+              (runtimeCurrentWorkspace updatedState)
+              (runtimeStyleState runtimeState)
+              (runtimeStyleState updatedState)
+      eventDeltas <- buildResetEventDeltas updatedState changedTopics
       pure
         RuntimeTransition
           { runtimeTransitionState = updatedState
-          , runtimeTransitionTopics =
-              RuntimeTopicState.changedStyleTopics
-                (runtimeFpVariant runtimeState)
-                (runtimeFpVariant updatedState)
-                (runtimePaletteEntries runtimeState)
-                (runtimePaletteEntries updatedState)
-                (runtimeBackdropEntries runtimeState)
-                (runtimeBackdropEntries updatedState)
-                (runtimeCurrentWorkspace runtimeState)
-                (runtimeCurrentWorkspace updatedState)
-                (runtimeStyleState runtimeState)
-                (runtimeStyleState updatedState)
+          , runtimeTransitionTopics = changedTopics
+          , runtimeTransitionEventDeltas = eventDeltas
           , runtimeTransitionEffects =
               [ RuntimeEffectApplyResolvedStyle resolvedStyle ]
           , runtimeTransitionMessage =
@@ -852,46 +905,89 @@ runtimeColorCount styleEntries =
         "NSCDE_COLOR_MODE"
         "8"
 
-performRuntimeTransitionEffects :: RuntimeTransition -> IO String
+buildResetEventDeltas :: RuntimeState -> [RuntimeTopic] -> IO [RuntimeEventDelta]
+buildResetEventDeltas runtimeState topics =
+  mapM (buildResetEventDelta runtimeState) topics
+
+buildResetEventDelta :: RuntimeState -> RuntimeTopic -> IO RuntimeEventDelta
+buildResetEventDelta runtimeState topic = do
+  entries <- queryTopicEntries runtimeState topic
+  pure $
+    RuntimeEventDelta
+      { runtimeEventDeltaTopic = topic
+      , runtimeEventDeltaKind = defaultEventKindForTopic topic
+      , runtimeEventDeltaEntries = entries
+      , runtimeEventDeltaUnsetKeys = []
+      , runtimeEventDeltaReset = True
+      }
+
+defaultEventKindForTopic :: RuntimeTopic -> RuntimeEventKind
+defaultEventKindForTopic topic =
+  case topic of
+    TopicSession -> EventArtifactRefreshed
+    TopicPanel -> EventStyleChanged
+    TopicPanelLayout -> EventPanelLayoutChanged
+    TopicWorkspaces -> EventWorkspaceNamesChanged
+    TopicBackdrops -> EventBackdropPlanChanged
+    TopicWindows -> EventWindowsChanged
+    TopicSubpanels -> EventSubpanelsChanged
+    TopicPager -> EventWorkspaceCurrentChanged
+    TopicTaskd -> EventTaskListChanged
+    TopicCapabilities -> EventCapabilitiesChanged
+    TopicStyle -> EventStyleChanged
+
+artifactRefreshEvent :: RuntimeRefreshTarget -> RuntimeEventDelta
+artifactRefreshEvent refreshTarget =
+  RuntimeEventDelta
+    { runtimeEventDeltaTopic = TopicSession
+    , runtimeEventDeltaKind = EventArtifactRefreshed
+    , runtimeEventDeltaEntries =
+        [ ("TARGET", renderRuntimeRefreshTarget refreshTarget) ]
+    , runtimeEventDeltaUnsetKeys = []
+    , runtimeEventDeltaReset = False
+    }
+
+performRuntimeTransitionEffects :: RuntimeTransition -> IO (String, [RuntimeEffectStatus])
 performRuntimeTransitionEffects transition = do
   effectStatuses <- mapM (performRuntimeEffect (runtimeTransitionState transition)) (runtimeTransitionEffects transition)
-  let failedEffects = filter (not . fst) effectStatuses
-  pure $
-    case failedEffects of
-      [] -> runtimeTransitionMessage transition
-      _ -> runtimeTransitionMessage transition ++ " (compat bridge unavailable)"
+  let failedEffects = filter (not . runtimeEffectSucceeded) effectStatuses
+      message =
+        case failedEffects of
+          [] -> runtimeTransitionMessage transition
+          _ -> runtimeTransitionMessage transition ++ " (compat bridge unavailable)"
+  pure (message, effectStatuses)
 
-performRuntimeEffect :: RuntimeState -> RuntimeEffect -> IO (Bool, RuntimeEffect)
+performRuntimeEffect :: RuntimeState -> RuntimeEffect -> IO RuntimeEffectStatus
 performRuntimeEffect runtimeState effect =
   case effect of
     RuntimeEffectCompatCommand fifoPath commandLine -> do
       success <- writeCompatCommand fifoPath commandLine
-      pure (success, effect)
+      pure (RuntimeEffectStatus success effect)
     RuntimeEffectApplyResolvedStyle resolvedStyle -> do
       writeBackdropOutputs runtimeState
       applyResolvedRuntimeStyleState runtimeState resolvedStyle
-      pure (True, effect)
+      pure (RuntimeEffectStatus True effect)
     RuntimeEffectRefreshLabwc refreshTargets -> do
       RuntimeLabwc.refreshLabwcArtifacts
         (runtimeLabwcContext runtimeState)
         refreshTargets
-      pure (True, effect)
+      pure (RuntimeEffectStatus True effect)
     RuntimeEffectReloadBackend -> do
       reloadBackend runtimeState
-      pure (True, effect)
+      pure (RuntimeEffectStatus True effect)
     RuntimeEffectLogoutBackend -> do
       logoutBackend runtimeState
-      pure (True, effect)
+      pure (RuntimeEffectStatus True effect)
     RuntimeEffectFailsafeTerminal -> do
       success <- RuntimeBackend.launchFailsafeTerminal (runtimeSystemPath runtimeState)
-      pure (success, effect)
+      pure (RuntimeEffectStatus success effect)
     RuntimeEffectPower powerAction -> do
       success <-
         RuntimeBackend.runPowerAction
           (runtimeToolsDir runtimeState)
           (runtimeSystemPath runtimeState)
           powerAction
-      pure (success, effect)
+      pure (RuntimeEffectStatus success effect)
 
 runtimeLabwcContext :: RuntimeState -> RuntimeLabwc.RuntimeLabwcContext
 runtimeLabwcContext runtimeState =
@@ -1015,5 +1111,5 @@ loadPanelLayoutEntries env paths
           if staticExists
             then do
               profile <- loadStaticPanelProfile staticPath
-              pure (emitPanelLayout profile)
+              pure (panelLayoutStateEntries (buildPanelLayoutState profile))
             else readEnvFileIfExists (runtimePanelLayoutFile paths)

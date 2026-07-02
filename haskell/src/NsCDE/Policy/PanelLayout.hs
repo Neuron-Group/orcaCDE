@@ -1,5 +1,6 @@
 module NsCDE.Policy.PanelLayout
-  ( emitPanelLayout
+  ( buildPanelLayoutState
+  , emitPanelLayout
   , loadStaticPanelProfile
   ) where
 
@@ -15,6 +16,13 @@ loadStaticPanelProfile staticPath = do
   staticSettings <- readEnvFile staticPath
   envSettings <- getEnvironment
   pure (buildStaticPanelProfile envSettings staticSettings)
+
+buildPanelLayoutState :: StaticPanelProfile -> PanelLayoutState
+buildPanelLayoutState profile =
+  PanelLayoutState
+    { panelLayoutProfile = profile
+    , panelLayoutEntries = emitPanelLayout profile
+    }
 
 emitPanelLayout :: StaticPanelProfile -> [KeyValue]
 emitPanelLayout profile =

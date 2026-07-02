@@ -1,4 +1,4 @@
-#!@KSH@
+#!/bin/sh
 
 #
 # Compatibility wrapper for runtime-owned labwc keybind publishing.

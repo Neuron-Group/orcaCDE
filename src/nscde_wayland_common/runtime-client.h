@@ -7,10 +7,13 @@
 
 #define NSCDE_RUNTIME_FIELD_LEN 256
 #define NSCDE_FD_REACTOR_MAX_WATCHERS 16
+#define NSCDE_RUNTIME_TOPIC_CACHE_MAX 16
 
 enum nscde_runtime_frame_type {
 	NSCDE_RUNTIME_FRAME_NONE = 0,
 	NSCDE_RUNTIME_FRAME_STATE,
+	NSCDE_RUNTIME_FRAME_SNAPSHOT,
+	NSCDE_RUNTIME_FRAME_EVENT,
 	NSCDE_RUNTIME_FRAME_ACK,
 	NSCDE_RUNTIME_FRAME_ERROR,
 };
@@ -25,8 +28,21 @@ enum nscde_runtime_read_result {
 struct nscde_runtime_frame {
 	enum nscde_runtime_frame_type type;
 	char topic[NSCDE_RUNTIME_FIELD_LEN];
+	char event[NSCDE_RUNTIME_FIELD_LEN];
+	char source[NSCDE_RUNTIME_FIELD_LEN];
+	char unset[NSCDE_RUNTIME_FIELD_LEN];
 	char message[NSCDE_RUNTIME_FIELD_LEN];
+	long long seq;
+	bool reset;
 	char *contents;
+};
+
+struct nscde_runtime_topic_cache_entry {
+	char topic[NSCDE_RUNTIME_FIELD_LEN];
+	char *contents;
+	size_t contents_len;
+	size_t contents_cap;
+	bool active;
 };
 
 struct nscde_runtime_subscription {
@@ -34,6 +50,8 @@ struct nscde_runtime_subscription {
 	char *buffer;
 	size_t buffer_len;
 	size_t buffer_cap;
+	struct nscde_runtime_topic_cache_entry
+		topic_caches[NSCDE_RUNTIME_TOPIC_CACHE_MAX];
 };
 
 struct nscde_runtime_publisher {

@@ -1036,7 +1036,9 @@ apply_runtime_frame(const struct nscde_runtime_frame *frame, void *userdata)
 {
 	(void)userdata;
 
-	if (!frame || frame->type != NSCDE_RUNTIME_FRAME_STATE ||
+	if (!frame || (frame->type != NSCDE_RUNTIME_FRAME_STATE &&
+			frame->type != NSCDE_RUNTIME_FRAME_SNAPSHOT &&
+			frame->type != NSCDE_RUNTIME_FRAME_EVENT) ||
 		!frame->contents) {
 		return;
 	}

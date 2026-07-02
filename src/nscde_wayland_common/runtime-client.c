@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include "runtime-client.h"
 
 #include <errno.h>
@@ -15,17 +17,30 @@
 
 static bool append_bytes(struct nscde_runtime_subscription *subscription,
 	const char *bytes, size_t len);
+static bool append_text(char **buffer, size_t *buffer_len, size_t *buffer_cap,
+	const char *text, size_t text_len);
 static bool connect_runtime_socket(bool nonblock, int *out_fd);
 static bool copy_text(char *dest, size_t dest_size, const char *src);
 static char *extract_frame_from_buffer(struct nscde_runtime_subscription *subscription);
 static const char *find_frame_delim(const char *text);
+static struct nscde_runtime_topic_cache_entry *find_topic_cache(
+	struct nscde_runtime_subscription *subscription, const char *topic,
+	bool create_if_missing);
+static void merge_topic_cache(struct nscde_runtime_subscription *subscription,
+	const struct nscde_runtime_frame *frame);
 static void parse_frame_metadata(const char *contents,
 	struct nscde_runtime_frame *frame);
+static bool topic_cache_remove_key(struct nscde_runtime_topic_cache_entry *cache,
+	const char *key);
+static bool topic_cache_set_key(struct nscde_runtime_topic_cache_entry *cache,
+	const char *key, const char *value);
 static char *read_response_frame(int fd);
 static bool resolve_socket_path(char *dest, size_t dest_size);
 static bool resolve_state_dir(char *dest, size_t dest_size);
 static bool set_nonblock(int fd);
 static bool send_frame_request(int fd, const char *request_text);
+static char *string_duplicate(const char *text);
+static char *split_csv_token(char **cursor);
 static bool write_text(char *dest, size_t dest_size, const char *src);
 
 bool
@@ -261,8 +276,8 @@ nscde_runtime_subscribe_topics(const char *topics,
 		return false;
 	}
 
-	snprintf(request, sizeof(request), "TYPE=subscribe\nTOPICS=%s\n\n",
-		topics);
+	snprintf(request, sizeof(request),
+		"TYPE=subscribe-events\nTOPICS=%s\nBOOTSTRAP=1\n\n", topics);
 	if (!send_frame_request(fd, request) || !set_nonblock(fd)) {
 		close(fd);
 		return false;
@@ -322,6 +337,23 @@ nscde_runtime_subscription_read(struct nscde_runtime_subscription *subscription,
 
 	out_frame->contents = contents;
 	parse_frame_metadata(contents, out_frame);
+	if (out_frame->type == NSCDE_RUNTIME_FRAME_SNAPSHOT ||
+		out_frame->type == NSCDE_RUNTIME_FRAME_EVENT) {
+		struct nscde_runtime_topic_cache_entry *cache;
+
+		merge_topic_cache(subscription, out_frame);
+		free(out_frame->contents);
+		out_frame->contents = NULL;
+		cache = find_topic_cache(subscription, out_frame->topic, false);
+		if (cache && cache->contents && cache->contents_len > 0) {
+			out_frame->contents = malloc(cache->contents_len + 1);
+			if (!out_frame->contents) {
+				return NSCDE_RUNTIME_READ_ERROR;
+			}
+			memcpy(out_frame->contents, cache->contents,
+				cache->contents_len + 1);
+		}
+	}
 	return NSCDE_RUNTIME_READ_FRAME;
 }
 
@@ -384,6 +416,14 @@ nscde_runtime_subscription_close(struct nscde_runtime_subscription *subscription
 	subscription->buffer = NULL;
 	subscription->buffer_len = 0;
 	subscription->buffer_cap = 0;
+	for (size_t i = 0; i < NSCDE_RUNTIME_TOPIC_CACHE_MAX; i++) {
+		free(subscription->topic_caches[i].contents);
+		subscription->topic_caches[i].contents = NULL;
+		subscription->topic_caches[i].contents_len = 0;
+		subscription->topic_caches[i].contents_cap = 0;
+		subscription->topic_caches[i].topic[0] = '\0';
+		subscription->topic_caches[i].active = false;
+	}
 	subscription->fd = -1;
 }
 
@@ -549,6 +589,38 @@ append_bytes(struct nscde_runtime_subscription *subscription,
 }
 
 static bool
+append_text(char **buffer, size_t *buffer_len, size_t *buffer_cap,
+	const char *text, size_t text_len)
+{
+	size_t required;
+	size_t next_cap;
+	char *grown;
+
+	if (!buffer || !buffer_len || !buffer_cap || !text) {
+		return false;
+	}
+
+	required = *buffer_len + text_len + 1;
+	if (required > *buffer_cap) {
+		next_cap = *buffer_cap ? *buffer_cap : FRAME_CHUNK_SIZE;
+		while (required > next_cap) {
+			next_cap *= 2;
+		}
+		grown = realloc(*buffer, next_cap);
+		if (!grown) {
+			return false;
+		}
+		*buffer = grown;
+		*buffer_cap = next_cap;
+	}
+
+	memcpy(*buffer + *buffer_len, text, text_len);
+	*buffer_len += text_len;
+	(*buffer)[*buffer_len] = '\0';
+	return true;
+}
+
+static bool
 connect_runtime_socket(bool nonblock, int *out_fd)
 {
 	int fd;
@@ -693,6 +765,10 @@ parse_frame_metadata(const char *contents, struct nscde_runtime_frame *frame)
 			value_len = line_len - 5;
 			if (value_len == 5 && !strncmp(value, "state", value_len)) {
 				frame->type = NSCDE_RUNTIME_FRAME_STATE;
+			} else if (value_len == 8 && !strncmp(value, "snapshot", value_len)) {
+				frame->type = NSCDE_RUNTIME_FRAME_SNAPSHOT;
+			} else if (value_len == 5 && !strncmp(value, "event", value_len)) {
+				frame->type = NSCDE_RUNTIME_FRAME_EVENT;
 			} else if (value_len == 3 && !strncmp(value, "ack", value_len)) {
 				frame->type = NSCDE_RUNTIME_FRAME_ACK;
 			} else if (value_len == 5 && !strncmp(value, "error", value_len)) {
@@ -714,6 +790,34 @@ parse_frame_metadata(const char *contents, struct nscde_runtime_frame *frame)
 			}
 			memcpy(frame->message, value, value_len);
 			frame->message[value_len] = '\0';
+		} else if (line_len > 6 && !strncmp(line, "EVENT=", 6)) {
+			value = line + 6;
+			value_len = line_len - 6;
+			if (value_len >= sizeof(frame->event)) {
+				value_len = sizeof(frame->event) - 1;
+			}
+			memcpy(frame->event, value, value_len);
+			frame->event[value_len] = '\0';
+		} else if (line_len > 7 && !strncmp(line, "SOURCE=", 7)) {
+			value = line + 7;
+			value_len = line_len - 7;
+			if (value_len >= sizeof(frame->source)) {
+				value_len = sizeof(frame->source) - 1;
+			}
+			memcpy(frame->source, value, value_len);
+			frame->source[value_len] = '\0';
+		} else if (line_len > 6 && !strncmp(line, "UNSET=", 6)) {
+			value = line + 6;
+			value_len = line_len - 6;
+			if (value_len >= sizeof(frame->unset)) {
+				value_len = sizeof(frame->unset) - 1;
+			}
+			memcpy(frame->unset, value, value_len);
+			frame->unset[value_len] = '\0';
+		} else if (line_len > 4 && !strncmp(line, "SEQ=", 4)) {
+			frame->seq = atoll(line + 4);
+		} else if (line_len > 6 && !strncmp(line, "RESET=", 6)) {
+			frame->reset = line[6] == '1';
 		}
 
 		if (!newline) {
@@ -721,6 +825,222 @@ parse_frame_metadata(const char *contents, struct nscde_runtime_frame *frame)
 		}
 		line = newline + 1;
 	}
+}
+
+static void
+merge_topic_cache(struct nscde_runtime_subscription *subscription,
+	const struct nscde_runtime_frame *frame)
+{
+	struct nscde_runtime_topic_cache_entry *cache;
+	char *copy = NULL;
+	char *cursor = NULL;
+	char *line;
+
+	if (!subscription || !frame || !frame->contents || !frame->topic[0]) {
+		return;
+	}
+
+	cache = find_topic_cache(subscription, frame->topic, true);
+	if (!cache) {
+		return;
+	}
+
+	if (frame->type == NSCDE_RUNTIME_FRAME_SNAPSHOT || frame->reset) {
+		free(cache->contents);
+		cache->contents = NULL;
+		cache->contents_len = 0;
+		cache->contents_cap = 0;
+	}
+
+	if (frame->unset[0]) {
+		copy = string_duplicate(frame->unset);
+		if (!copy) {
+			return;
+		}
+		cursor = copy;
+		for (;;) {
+			char *token = split_csv_token(&cursor);
+			if (!token) {
+				break;
+			}
+			topic_cache_remove_key(cache, token);
+			free(token);
+		}
+		free(copy);
+		copy = NULL;
+	}
+
+	copy = string_duplicate(frame->contents);
+	if (!copy) {
+		return;
+	}
+
+	cursor = NULL;
+	for (line = strtok_r(copy, "\n", &cursor);
+		line;
+		line = strtok_r(NULL, "\n", &cursor)) {
+		char *equals = strchr(line, '=');
+		if (!equals) {
+			continue;
+		}
+		*equals = '\0';
+		topic_cache_set_key(cache, line, equals + 1);
+	}
+	free(copy);
+}
+
+static struct nscde_runtime_topic_cache_entry *
+find_topic_cache(struct nscde_runtime_subscription *subscription,
+	const char *topic, bool create_if_missing)
+{
+	size_t i;
+
+	if (!subscription || !topic || !topic[0]) {
+		return NULL;
+	}
+
+	for (i = 0; i < NSCDE_RUNTIME_TOPIC_CACHE_MAX; i++) {
+		if (subscription->topic_caches[i].active &&
+			!strcmp(subscription->topic_caches[i].topic, topic)) {
+			return &subscription->topic_caches[i];
+		}
+	}
+
+	if (!create_if_missing) {
+		return NULL;
+	}
+
+	for (i = 0; i < NSCDE_RUNTIME_TOPIC_CACHE_MAX; i++) {
+		if (!subscription->topic_caches[i].active) {
+			subscription->topic_caches[i].active = true;
+			copy_text(subscription->topic_caches[i].topic,
+				sizeof(subscription->topic_caches[i].topic), topic);
+			return &subscription->topic_caches[i];
+		}
+	}
+
+	return NULL;
+}
+
+static bool
+topic_cache_remove_key(struct nscde_runtime_topic_cache_entry *cache,
+	const char *key)
+{
+	char *result = NULL;
+	size_t result_len = 0;
+	size_t result_cap = 0;
+	char *copy = NULL;
+	char *cursor = NULL;
+	char *line;
+	size_t key_len;
+
+	if (!cache || !key || !key[0]) {
+		return false;
+	}
+
+	if (!cache->contents || !cache->contents_len) {
+		return true;
+	}
+
+	key_len = strlen(key);
+	copy = string_duplicate(cache->contents);
+	if (!copy) {
+		return false;
+	}
+
+	for (line = strtok_r(copy, "\n", &cursor);
+		line;
+		line = strtok_r(NULL, "\n", &cursor)) {
+		if (!strncmp(line, key, key_len) && line[key_len] == '=') {
+			continue;
+		}
+		if (!append_text(&result, &result_len, &result_cap, line, strlen(line))
+			|| !append_text(&result, &result_len, &result_cap, "\n", 1)) {
+			free(copy);
+			free(result);
+			return false;
+		}
+	}
+
+	free(copy);
+	free(cache->contents);
+	cache->contents = result;
+	cache->contents_len = result_len;
+	cache->contents_cap = result_cap;
+	return true;
+}
+
+static bool
+topic_cache_set_key(struct nscde_runtime_topic_cache_entry *cache,
+	const char *key, const char *value)
+{
+	size_t key_len;
+	size_t value_len;
+
+	if (!cache || !key || !value) {
+		return false;
+	}
+
+	key_len = strlen(key);
+	value_len = strlen(value);
+	if (!topic_cache_remove_key(cache, key)) {
+		return false;
+	}
+
+	if (!append_text(&cache->contents, &cache->contents_len,
+		&cache->contents_cap, key, key_len) ||
+		!append_text(&cache->contents, &cache->contents_len,
+		&cache->contents_cap, "=", 1) ||
+		!append_text(&cache->contents, &cache->contents_len,
+		&cache->contents_cap, value, value_len) ||
+		!append_text(&cache->contents, &cache->contents_len,
+		&cache->contents_cap, "\n", 1)) {
+		return false;
+	}
+
+	return true;
+}
+
+static char *
+split_csv_token(char **cursor)
+{
+	char *token;
+	char *comma;
+
+	if (!cursor || !*cursor || !(*cursor)[0]) {
+		return NULL;
+	}
+
+	token = *cursor;
+	comma = strchr(token, ',');
+	if (comma) {
+		*comma = '\0';
+		*cursor = comma + 1;
+	} else {
+		*cursor = token + strlen(token);
+	}
+
+	return string_duplicate(token);
+}
+
+static char *
+string_duplicate(const char *text)
+{
+	size_t len;
+	char *copy;
+
+	if (!text) {
+		return NULL;
+	}
+
+	len = strlen(text);
+	copy = malloc(len + 1);
+	if (!copy) {
+		return NULL;
+	}
+
+	memcpy(copy, text, len + 1);
+	return copy;
 }
 
 static char *

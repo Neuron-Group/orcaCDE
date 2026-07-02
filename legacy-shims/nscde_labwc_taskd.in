@@ -1,12 +1,11 @@
-#!@KSH@
+#!/bin/sh
 
 #
-# NsCDE task list daemon for labwc backend.
+# NsCDE task list refresh shim for labwc backend.
 #
-# Compatibility wrapper for task list state publication.
-# Runtime-owned task state is now derived directly from runtime windows state.
-#
-# This shim performs a one-shot refresh for compatibility consumers and exits.
+# Runtime-owned task state is derived directly from runtime windows state.
+# This wrapper performs a one-shot runtime query for compatibility consumers
+# and exits; it no longer falls back to shell-owned task publication.
 #
 
 if [ -z "$HOME" ]; then
@@ -14,32 +13,29 @@ if [ -z "$HOME" ]; then
    exit 2
 fi
 
-export NSCDE_BACKEND=${NSCDE_BACKEND:-labwc}
-export NSCDE_ROOT=${NSCDE_ROOT:-@prefix@}
-
-# Source the shared backend library
-. "@NSCDE_TOOLSDIR@/nscde_backend.shlib"
-
-# Initialize backend environment
-nscde_backend_init || exit 2
-
-# Ensure state directory exists
-nscde_state_ensure_dir
-
 _RUNTIME_BIN="${NSCDE_RUNTIME_BIN:-nscde-runtime}"
-_taskd_env="${NSCDE_STATE_DIR}/taskd.env"
+
+if ! command -v "$_RUNTIME_BIN" >/dev/null 2>&1; then
+   echo "Error: nscde-runtime not found for taskd refresh." >&2
+   exit 127
+fi
+
+if [ -n "${NSCDE_STATE_DIR:-}" ]; then
+   _state_dir=$NSCDE_STATE_DIR
+else
+   _cache_home=${XDG_CACHE_HOME:-"$HOME/.cache"}
+   _state_dir="${_cache_home}/nscde-stage1"
+fi
+
+mkdir -p "$_state_dir"
+
+_taskd_env="${_state_dir}/taskd.env"
 _taskd_tmp="${_taskd_env}.tmp"
 
-refresh_task_state() {
-   if command -v "$_RUNTIME_BIN" >/dev/null 2>&1; then
-      if "$_RUNTIME_BIN" query taskd > "$_taskd_tmp"; then
-         mv "$_taskd_tmp" "$_taskd_env"
-         return 0
-      fi
-      rm -f "$_taskd_tmp"
-   fi
+if ! "$_RUNTIME_BIN" query taskd > "$_taskd_tmp"; then
+   rm -f "$_taskd_tmp"
+   echo "Error: unable to query runtime taskd state." >&2
+   exit 1
+fi
 
-   nscde_taskd_publish
-}
-
-refresh_task_state
+mv "$_taskd_tmp" "$_taskd_env"

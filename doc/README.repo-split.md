@@ -102,10 +102,13 @@ Current limitation:
   count as a fully standalone runtime
 - some of those remaining pieces still live as `.in` templates because they
   rely on configure-style substitution during packaging
-- the live runtime path itself is now largely clear: socket `query` /
-  `subscribe` is the primary API for long-lived clients, and the recent
-  event-driven refactor removed the old steady-state polling loops from the
-  active Qt and native daemon paths
+- the live runtime path itself is now largely clear: socket `query`, legacy
+  `subscribe`, and canonical `subscribe-events` define the runtime API for
+  long-lived clients, and the recent event-driven refactor removed the old
+  steady-state polling loops from the active Qt and native daemon paths
+- `subscribe-events` is the intended live contract: bootstrap `snapshot`
+  frames establish topic state, sequenced `event` frames carry deltas, and
+  native consumers merge `RESET` / `UNSET` metadata into cached topic state
 - `menu.xml` generation has already moved out of that set: the standalone
   launcher now uses `nscde-runtime` for menu publishing, and the packaged
   bootstrap no longer ships `nscde_labwc_menugen`
@@ -133,6 +136,9 @@ Recent runtime-clarity progress:
 - `nscde_pagerd` now publishes workspace snapshots into the runtime, so
   `pager.env` and `workspaces.env` remain compatibility mirrors rather than
   pager-owned canonical state
+- the shared native runtime client now keeps per-topic caches for
+  multi-topic subscribers, so `nscde_paneld` and other native consumers can
+  merge runtime snapshots and event deltas without reintroducing local polling
 
 ## Repo layout decision
 
